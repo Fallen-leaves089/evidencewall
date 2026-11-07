@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evidencewall"
+version = "0.3.0"
+description = "Evidence-first, multi-endpoint decoy traffic monitoring and evidence preservation sensor."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Fallen-leaves" }]
+keywords = [
+  "security",
+  "deception",
+  "honeypot",
+  "network-monitoring",
+  "forensics",
+  "evidence",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+]
+dependencies = [
+  "cryptography>=42",
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
+]
+
+[project.urls]
+Homepage = "https://github.com/Fallen-leaves089/evidencewall"
+Repository = "https://github.com/Fallen-leaves089/evidencewall"
+Issues = "https://github.com/Fallen-leaves089/evidencewall/issues"
+Changelog = "https://github.com/Fallen-leaves089/evidencewall/blob/main/CHANGELOG.md"
+Security = "https://github.com/Fallen-leaves089/evidencewall/security/policy"
+
+[project.optional-dependencies]
+test = ["httpx>=0.27"]
+release = ["build>=1.2", "twine>=5"]
+
+[project.scripts]
+evidencewall = "evidencewall.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+evidencewall = ["profiles/*.json"]
+

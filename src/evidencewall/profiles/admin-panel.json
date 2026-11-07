@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "profile_id": "admin-panel",
+  "name": "Generic admin panel",
+  "version": "2026.11",
+  "transport": "http1",
+  "tarpit_ms": 250,
+  "routes": [
+    {
+      "route_id": "config",
+      "methods": ["GET"],
+      "paths": ["/api/config"],
+      "status": 401,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx",
+        "Cache-Control": "no-store"
+      },
+      "body": "{\"error\":\"unauthorized\",\"request_id\":\"ew-4f12\",\"token\":\"{{CANARY:admin-token}}\"}\n"
+    },
+    {
+      "route_id": "admin",
+      "methods": ["GET"],
+      "paths": ["/admin", "/admin/"],
+      "status": 403,
+      "headers": {
+        "Content-Type": "text/html; charset=utf-8",
+        "Server": "nginx",
+        "Set-Cookie": "ew_session={{CANARY:cookie}}; Path=/; HttpOnly; SameSite=Lax"
+      },
+      "body": "<!doctype html><html><head><title>Forbidden</title></head><body><h1>Forbidden</h1></body></html>\n"
+    },
+    {
+      "route_id": "sensitive-file",
+      "methods": ["GET", "HEAD"],
+      "paths": ["/.env", "/.git/config"],
+      "status": 404,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "Not Found\n"
+    }
+  ],
+  "fallback": {
+    "status": 404,
+    "headers": {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Server": "nginx"
+    },
+    "body": "Not Found\n"
+  }
+}

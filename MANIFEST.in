@@ -1,0 +1,12 @@
+include LICENSE
+include NOTICE
+include README.md
+include README.en.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+include SECURITY.md
+include EVIDENCEWALL-SPEC.md
+recursive-include src/evidencewall/profiles *.json
+global-exclude __pycache__ *.py[cod] *.egg-info
+

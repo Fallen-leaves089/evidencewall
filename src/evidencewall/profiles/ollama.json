@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "profile_id": "ollama",
+  "name": "Ollama-compatible model service",
+  "version": "2026.11",
+  "transport": "http1",
+  "tarpit_ms": 60,
+  "routes": [
+    {
+      "route_id": "root",
+      "methods": ["GET", "HEAD"],
+      "paths": ["/"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "Ollama is running\n"
+    },
+    {
+      "route_id": "version",
+      "methods": ["GET"],
+      "paths": ["/api/version"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"version\":\"0.5.13\"}\n"
+    },
+    {
+      "route_id": "tags",
+      "methods": ["GET"],
+      "paths": ["/api/tags"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"models\":[{\"name\":\"llama3.2:latest\",\"model\":\"llama3.2:latest\",\"modified_at\":\"2026-10-28T09:12:00Z\",\"size\":2019393189,\"digest\":\"a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72\",\"details\":{\"family\":\"llama\",\"parameter_size\":\"3.2B\",\"quantization_level\":\"Q4_K_M\"}}]}\n"
+    },
+    {
+      "route_id": "openai-models",
+      "methods": ["GET"],
+      "paths": ["/v1/models", "/v1/models/*"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"object\":\"list\",\"data\":[{\"id\":\"llama3.2:latest\",\"object\":\"model\",\"created\":1761000000,\"owned_by\":\"library\"}],\"api_key\":\"{{CANARY:api-key}}\"}\n"
+    }
+  ],
+  "fallback": {
+    "status": 404,
+    "headers": {
+      "Content-Type": "application/json; charset=utf-8",
+      "Server": "nginx"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  }
+}

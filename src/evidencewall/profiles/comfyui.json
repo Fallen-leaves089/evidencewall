@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "profile_id": "comfyui",
+  "name": "ComfyUI-compatible workflow service",
+  "version": "2026.11",
+  "transport": "http1",
+  "tarpit_ms": 90,
+  "routes": [
+    {
+      "route_id": "root",
+      "methods": ["GET", "HEAD"],
+      "paths": ["/"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "text/html; charset=utf-8",
+        "Server": "nginx",
+        "Set-Cookie": "comfy_session={{CANARY:cookie}}; Path=/; HttpOnly; SameSite=Lax"
+      },
+      "body": "<!doctype html><html><head><title>ComfyUI</title></head><body><div id=\"app\">ComfyUI</div></body></html>\n"
+    },
+    {
+      "route_id": "system-stats",
+      "methods": ["GET"],
+      "paths": ["/system_stats"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"system\":{\"os\":\"posix\",\"ram_total\":33554432,\"ram_free\":16777216,\"comfyui_version\":\"0.3.45\",\"python_version\":\"3.11.9\"},\"devices\":[{\"name\":\"cuda:0 NVIDIA RTX 4090\",\"type\":\"cuda\",\"index\":0,\"vram_total\":25769803776,\"vram_free\":23622320128}],\"webhook\":\"{{CANARY:webhook-url}}\"}\n"
+    },
+    {
+      "route_id": "object-info",
+      "methods": ["GET"],
+      "paths": ["/object_info"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"KSampler\":{\"input\":{\"required\":{\"model\":[[\"v1-5-pruned-emaonly.safetensors\"]],\"seed\":[\"INT\",{\"default\":0}]}},\"output\":[\"LATENT\"]}}\n"
+    },
+    {
+      "route_id": "queue",
+      "methods": ["GET"],
+      "paths": ["/queue"],
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Server": "nginx"
+      },
+      "body": "{\"queue_running\":[],\"queue_pending\":[]}\n"
+    }
+  ],
+  "fallback": {
+    "status": 404,
+    "headers": {
+      "Content-Type": "application/json; charset=utf-8",
+      "Server": "nginx"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  }
+}
