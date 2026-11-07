@@ -72,3 +72,78 @@ python -m pip install .
 ## 许可证
 
 Apache License 2.0。见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
+
+---
+
+## English
+
+**EvidenceWall v0.3.0 - First public preview**
+
+Released: 2026-11-08
+
+EvidenceWall is an independent, out-of-band, multi-endpoint decoy traffic monitoring and evidence-preservation sensor. It is designed for human-led review and later evidence preservation. It does not take over production traffic, auto-ban, actively scan, or counter-attack.
+
+### Highlights
+
+- Multi-endpoint matrix for one Sensor, with per-endpoint listen addresses, advertised mappings, and service Profiles.
+- HTTP/1.1 decoy listeners and generic TCP first-payload metadata listeners that retain only bounded metadata, lengths, and hashes.
+- Four constrained JSON Profiles: `admin-panel`, `ollama`, `comfyui`, and `tcp-metadata`.
+- Canary Groups with creation, cross-endpoint deployment, rotation, matching, and signed incremental synchronization.
+- Deterministic correlation across sources, endpoints, Canaries, fingerprints, targeted services, and a 24-hour sliding window.
+- Manual case review, case timelines, custody records, and explicit Legal Hold.
+- Evidence Package directory/ZIP export with offline verification of file hashes, Collector/Sensor signatures, and the event hash chain.
+- Optional import of allow-listed Highwall audit events as supporting evidence for existing cases only.
+
+### Verification
+
+- 25 automated tests pass on Python 3.10 and 3.12 in clean virtual environments.
+- CI covers Windows and Linux with Python 3.10 through 3.13.
+- `pip check`, `compileall`, and `twine check` pass.
+- The wheel and sdist install in isolated environments, and the CLI reports version `0.3.0`.
+- Current validation covers real local socket listeners, synthetic event correlation, the Collector API, evidence export/tamper detection, and the CLI. It does not prove public multi-IP, multi-port, NAT, or proxy deployment.
+
+### Installation
+
+After downloading the wheel from this release:
+
+```powershell
+python -m pip install .\evidencewall-0.3.0-py3-none-any.whl
+evidencewall --version
+```
+
+Or install from source:
+
+```powershell
+python -m pip install .
+```
+
+### Important security boundaries
+
+- This is a usable but not production-hardened public preview. Do not expose it directly to an untrusted network.
+- The Collector management API has no built-in administrator authentication or TLS. It binds to `127.0.0.1` by default; non-loopback binding requires the explicit `--allow-remote` flag and must sit behind an authenticated, TLS-terminating proxy with source restrictions.
+- The Highwall import endpoint is part of the management surface. It must be protected together with case-query endpoints. Imported events are not signed by an upstream Highwall instance.
+- Legal Hold currently records, audits, and requires explicit confirmation for release. This release has no retention-deletion worker, so it does not claim that automatic deletion is reliably blocked.
+- Real multi-IP, multi-port, NAT, and proxy topology has not yet completed T0/T1 deployment acceptance.
+- The Collector public key embedded in an Evidence Package only proves internal consistency. Adversarial or third-party verification must pin an external trusted key.
+- HTTP decoys do not terminate TLS. This release has no UI, tray application, production traffic mirroring, or inline proxy.
+- EvidenceWall does not auto-ban, actively scan, counter-attack, or perform hack-back. Canary hits create evidence and alerts only.
+
+### Release assets
+
+- `evidencewall-0.3.0-py3-none-any.whl`
+  - SHA256: `8e44e7301bf76acf12b3d10555195f1eb4ae604c92ee6cfa95c0c0d56e4cf6b3`
+- `evidencewall-0.3.0.tar.gz`
+  - SHA256: `e23d00c0767fb3362056c51514dcd910722c2aa15cb3844b2ead8e08e021debe`
+- `SHA256SUMS.txt`
+
+### Documentation
+
+- [README](README.md)
+- [Product specification](EVIDENCEWALL-SPEC.md)
+- [Changelog](CHANGELOG.md)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+
+### License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
