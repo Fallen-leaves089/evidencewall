@@ -68,7 +68,7 @@ class SensorRuntime:
         self._storage_failure_until = 0.0
         self._storage_failure_reason: str | None = None
         self._reclaim_lock = threading.Lock()
-        self._last_reclaim_attempt = 0.0
+        self._last_reclaim_attempt: float | None = None
         self._last_reclaim_error: str | None = None
 
     @classmethod
@@ -176,7 +176,10 @@ class SensorRuntime:
         )
 
     def _attempt_buffer_reclaim(self, now: float) -> bool:
-        if now - self._last_reclaim_attempt < BUFFER_RECLAIM_COOLDOWN_SECONDS:
+        if (
+            self._last_reclaim_attempt is not None
+            and now - self._last_reclaim_attempt < BUFFER_RECLAIM_COOLDOWN_SECONDS
+        ):
             return False
         if not self._reclaim_lock.acquire(blocking=False):
             return False

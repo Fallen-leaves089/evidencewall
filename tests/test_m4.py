@@ -255,7 +255,8 @@ class SensorBufferLimitTests(unittest.TestCase):
                 self.assertTrue(runtime.store.mark_batch_sent(batch["batch_id"]))
             self.assertGreater(runtime._buffer_file_bytes(), 128 * 1024)
 
-            state = runtime.buffer_state(force=True)
+            with patch("evidencewall.sensor.time.monotonic", return_value=1.0):
+                state = runtime.buffer_state(force=True)
             self.assertTrue(state["accepting"], state["blocked_reasons"])
             self.assertLess(runtime._buffer_file_bytes(), 128 * 1024)
             next_event = runtime.store.append_event(runtime.make_test_event(path="/after-compaction"))
