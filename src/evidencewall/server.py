@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
 
 from . import __version__
 from .batch import verify_batch
@@ -16,6 +16,7 @@ from .crypto import (
     Ed25519PublicKey,
     load_public_key_text,
     sha256_hex,
+    verify_payload,
 )
 from .domain import Endpoint, ValidationError, utc_now
 from .evidence import EvidenceError, export_case_package, verify_package
@@ -74,6 +75,56 @@ class CanarySyncRequest(BaseModel):
     sensor_signature: str
 
 
+class SensorBufferHealth(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    accepting: bool
+    blocked_reasons: list[Annotated[str, Field(max_length=256)]] = Field(
+        default_factory=list, max_length=32
+    )
+    warnings: list[Annotated[str, Field(max_length=256)]] = Field(
+        default_factory=list, max_length=32
+    )
+    max_events: int = Field(ge=1, le=10_000_000)
+    max_bytes: int = Field(ge=1, le=10**13)
+    min_free_disk_bytes: int = Field(ge=0, le=10**13)
+    pending_batches: int = Field(ge=0, le=1_000_000)
+
+
+class SensorEndpointHealth(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    endpoint_id: str = Field(min_length=1, max_length=128)
+    enabled: bool
+    listening: bool
+    listen_ip: str = Field(min_length=1, max_length=64)
+    listen_port: int = Field(ge=1, le=65535)
+    advertised_ip: str = Field(min_length=1, max_length=64)
+    advertised_port: int = Field(ge=1, le=65535)
+    transport: str = Field(min_length=1, max_length=16)
+    profile_id: str = Field(min_length=1, max_length=128)
+    profile_version: str | None = Field(default=None, min_length=1, max_length=64)
+    source_quality: str = Field(min_length=1, max_length=32)
+    mapping_consistent: bool | None = None
+
+
+class SensorHealthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: int
+    sensor_id: str = Field(min_length=1, max_length=128)
+    matrix_id: str = Field(min_length=1, max_length=128)
+    sent_at: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=128)
+    status: str = Field(pattern="^(ok|degraded|blocked|unknown)$")
+    queue_depth: int = Field(ge=0, le=10_000_000)
+    buffer_bytes: int = Field(ge=0, le=10**13)
+    disk_free_bytes: int | None = Field(default=None, ge=0, le=10**13)
+    buffer: SensorBufferHealth
+    endpoints: list[SensorEndpointHealth] = Field(max_length=256)
+    sensor_signature: str = Field(min_length=1, max_length=1024)
+
+
 class HighwallEventInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -117,6 +168,10 @@ def create_app(
     )
     package_root = Path(exports_dir) if exports_dir is not None else store.path.parent / "exports"
     package_root.mkdir(parents=True, exist_ok=True)
+
+    @app.exception_handler(ValidationError)
+    async def validation_error_handler(_request: Request, exc: ValidationError):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def enforce_body_limit(request: Request, call_next):
@@ -191,6 +246,8 @@ def create_app(
             public_key = load_public_key_text(sensor["public_key"])
             events = verify_batch(public_key, payload)
         except (CryptoError, ValidationError) as exc:
+            if "signature" in str(exc).lower():
+                store.record_signature_failure(sensor_id)
             store.audit(
                 "batch_rejected",
                 sensor_id,
@@ -223,6 +280,57 @@ def create_app(
     @app.get("/v1/endpoints")
     def list_endpoints() -> dict[str, Any]:
         return {"endpoints": store.list_endpoints()}
+
+    @app.post("/v1/sensors/health")
+    def sensor_health(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            request = SensorHealthRequest.model_validate(payload)
+        except PydanticValidationError as exc:
+            details = exc.errors(include_url=False, include_input=False)
+            raise HTTPException(status_code=400, detail=f"invalid sensor health payload: {details}") from exc
+        if request.schema_version != 1:
+            raise HTTPException(status_code=400, detail="unsupported sensor health schema_version")
+        sensor = store.get_sensor(request.sensor_id, include_public_key=True)
+        if sensor is None:
+            raise HTTPException(status_code=404, detail="unknown sensor")
+        signed_payload = {key: value for key, value in payload.items() if key != "sensor_signature"}
+        try:
+            public_key = load_public_key_text(sensor["public_key"])
+        except CryptoError as exc:
+            raise HTTPException(status_code=500, detail="registered sensor key is invalid") from exc
+        if not verify_payload(public_key, signed_payload, request.sensor_signature):
+            store.record_signature_failure(request.sensor_id)
+            store.audit(
+                "sensor_health_rejected",
+                request.sensor_id,
+                {"error": "signature verification failed"},
+            )
+            raise HTTPException(status_code=400, detail="health signature verification failed")
+        if request.matrix_id != sensor["matrix_id"]:
+            raise HTTPException(status_code=409, detail="health matrix_id does not match registered sensor")
+        try:
+            return store.record_sensor_health(
+                sensor_id=request.sensor_id,
+                matrix_id=request.matrix_id,
+                sent_at=request.sent_at,
+                version=request.version,
+                health_status=request.status,
+                queue_depth=request.queue_depth,
+                buffer_bytes=request.buffer_bytes,
+                disk_free_bytes=request.disk_free_bytes,
+                endpoint_health=[item.model_dump() for item in request.endpoints],
+                buffer=request.buffer.model_dump(),
+                metadata={"source": "sensor_health"},
+            )
+        except ValidationError as exc:
+            store.audit(
+                "sensor_health_rejected",
+                request.sensor_id,
+                {"error": str(exc)},
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StorageError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/v1/cases")
     def list_cases(
@@ -312,6 +420,11 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except StorageError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"cannot export evidence package: {exc}",
+            ) from exc
         except EvidenceError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"status": "exported", "package": package}
@@ -364,6 +477,8 @@ def create_app(
                 deployments=deployments,
             )
         except (CryptoError, ValidationError) as exc:
+            if "signature" in str(exc).lower():
+                store.record_signature_failure(request.sensor_id)
             store.audit(
                 "canary_sync_rejected",
                 request.sensor_id,

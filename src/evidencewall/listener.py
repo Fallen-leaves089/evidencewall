@@ -21,6 +21,9 @@ MAX_HEADER_BYTES = 32 * 1024
 MAX_BODY_BYTES = 64 * 1024
 MAX_FIRST_PAYLOAD_BYTES = 256
 MAX_HEADER_COUNT = 100
+MAX_CONCURRENT_CONNECTIONS = 256
+MAX_CONNECTIONS_PER_SOURCE = 32
+CONNECTION_ACQUIRE_TIMEOUT_SECONDS = 0.1
 
 
 class ListenerError(RuntimeError):
@@ -120,11 +123,23 @@ def _render_http_response(
 
 
 class SensorListenerService:
-    def __init__(self, runtime: SensorRuntime, canaries: CanaryStore | None = None):
+    def __init__(
+        self,
+        runtime: SensorRuntime,
+        canaries: CanaryStore | None = None,
+        *,
+        max_connections: int = MAX_CONCURRENT_CONNECTIONS,
+        max_connections_per_source: int = MAX_CONNECTIONS_PER_SOURCE,
+    ):
         self.runtime = runtime
         self.canaries = canaries or CanaryStore.load(runtime.paths.canaries)
         self._servers: list[tuple[Endpoint, asyncio.AbstractServer]] = []
         self._profiles: dict[str, HttpProfile | TcpProfile] = {}
+        self._max_connections = max(1, int(max_connections))
+        self._max_connections_per_source = max(1, int(max_connections_per_source))
+        self._connection_slots = asyncio.Semaphore(self._max_connections)
+        self._active_by_source: dict[str, int] = {}
+        self._accepting = True
         for endpoint in runtime.matrix.endpoints:
             if not endpoint.enabled:
                 continue
@@ -135,49 +150,171 @@ class SensorListenerService:
                 )
             self._profiles[endpoint.profile_id] = profile
 
+    @property
+    def is_listening(self) -> bool:
+        return self._accepting and bool(self._servers)
+
     async def start(self) -> list[dict[str, Any]]:
+        if self._servers:
+            return self._listener_descriptors()
+        self._accepting = True
         started: list[dict[str, Any]] = []
-        for endpoint in self.runtime.matrix.endpoints:
-            if not endpoint.enabled:
-                continue
-            profile = self._profiles[endpoint.profile_id]
-            if isinstance(profile, HttpProfile):
+        try:
+            for endpoint in self.runtime.matrix.endpoints:
+                if not endpoint.enabled:
+                    continue
+                profile = self._profiles[endpoint.profile_id]
+
                 async def handler(reader, writer, ep=endpoint, prof=profile):
-                    await self._handle_http(ep, prof, reader, writer)
-            else:
-                async def handler(reader, writer, ep=endpoint, prof=profile):
-                    await self._handle_tcp(ep, prof, reader, writer)
-            try:
+                    await self._dispatch(ep, prof, reader, writer)
+
                 server = await asyncio.start_server(
                     handler,
                     host=endpoint.listen_ip,
                     port=endpoint.listen_port,
                     limit=MAX_HEADER_BYTES + MAX_BODY_BYTES,
                 )
-            except OSError as exc:
-                await self.close()
-                raise ListenerError(
-                    f"cannot listen on {endpoint.listen_ip}:{endpoint.listen_port}: {exc}"
-                ) from exc
-            self._servers.append((endpoint, server))
-            started.append(
-                {
-                    "endpoint_id": endpoint.endpoint_id,
-                    "listen": f"{endpoint.listen_ip}:{endpoint.listen_port}",
-                    "advertised": f"{endpoint.advertised_ip}:{endpoint.advertised_port}",
-                    "transport": endpoint.transport,
-                    "profile_id": endpoint.profile_id,
-                }
+                self._servers.append((endpoint, server))
+                started.append(self._listener_descriptor(endpoint))
+        except OSError as exc:
+            failed_endpoint = endpoint if "endpoint" in locals() else None
+            await self.pause_listeners()
+            address = (
+                f"{failed_endpoint.listen_ip}:{failed_endpoint.listen_port}"
+                if failed_endpoint is not None
+                else "configured endpoint"
             )
+            raise ListenerError(f"cannot listen on {address}: {exc}") from exc
         return started
 
-    async def close(self) -> None:
+    def _listener_descriptor(self, endpoint: Endpoint) -> dict[str, Any]:
+        return {
+            "endpoint_id": endpoint.endpoint_id,
+            "listen": f"{endpoint.listen_ip}:{endpoint.listen_port}",
+            "advertised": f"{endpoint.advertised_ip}:{endpoint.advertised_port}",
+            "transport": endpoint.transport,
+            "profile_id": endpoint.profile_id,
+        }
+
+    def _listener_descriptors(self) -> list[dict[str, Any]]:
+        return [self._listener_descriptor(endpoint) for endpoint, _server in self._servers]
+
+    async def pause_listeners(self) -> None:
+        self._accepting = False
         servers = self._servers
         self._servers = []
         for _endpoint, server in servers:
             server.close()
         for _endpoint, server in servers:
             await server.wait_closed()
+
+    async def resume_listeners(self) -> list[dict[str, Any]]:
+        if self._servers:
+            self._accepting = True
+            return self._listener_descriptors()
+        return await self.start()
+
+    async def close(self) -> None:
+        await self.pause_listeners()
+
+    @staticmethod
+    async def _close_writer(writer: asyncio.StreamWriter) -> None:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+
+    async def _dispatch(
+        self,
+        endpoint: Endpoint,
+        profile: HttpProfile | TcpProfile,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        if not self._accepting:
+            await self._close_writer(writer)
+            return
+        try:
+            source_ip, _source_port = _socket_address(
+                writer.get_extra_info("peername"), "source"
+            )
+        except ListenerError:
+            await self._close_writer(writer)
+            return
+        active_for_source = self._active_by_source.get(source_ip, 0)
+        if active_for_source >= self._max_connections_per_source:
+            await self._close_writer(writer)
+            return
+        self._active_by_source[source_ip] = active_for_source + 1
+        try:
+            await asyncio.wait_for(
+                self._connection_slots.acquire(),
+                timeout=CONNECTION_ACQUIRE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self._release_source(source_ip)
+            await self._close_writer(writer)
+            return
+        except asyncio.CancelledError:
+            self._release_source(source_ip)
+            if not writer.is_closing():
+                writer.close()
+            raise
+
+        try:
+            if isinstance(profile, HttpProfile):
+                await self._handle_http(endpoint, profile, reader, writer)
+            else:
+                await self._handle_tcp(endpoint, profile, reader, writer)
+        except Exception:
+            LOGGER.exception("unhandled decoy connection failure")
+        finally:
+            self._release_source(source_ip)
+            self._connection_slots.release()
+            if not writer.is_closing():
+                await self._close_writer(writer)
+
+    def _release_source(self, source_ip: str) -> None:
+        remaining = self._active_by_source.get(source_ip, 1) - 1
+        if remaining > 0:
+            self._active_by_source[source_ip] = remaining
+        else:
+            self._active_by_source.pop(source_ip, None)
+
+    def health_endpoints(self) -> list[dict[str, Any]]:
+        listening_ids = {endpoint.endpoint_id for endpoint, _server in self._servers}
+        result: list[dict[str, Any]] = []
+        for endpoint in self.runtime.matrix.endpoints:
+            profile = self._profiles.get(endpoint.profile_id)
+            if profile is None:
+                try:
+                    profile = get_profile(endpoint.profile_id)
+                except Exception:
+                    profile = None
+            mapping_consistent = None
+            if endpoint.exposure == "direct":
+                mapping_consistent = (
+                    endpoint.listen_ip == endpoint.advertised_ip
+                    and endpoint.listen_port == endpoint.advertised_port
+                )
+            result.append(
+                {
+                    "endpoint_id": endpoint.endpoint_id,
+                    "enabled": endpoint.enabled,
+                    "listening": self._accepting and endpoint.endpoint_id in listening_ids,
+                    "listen_ip": endpoint.listen_ip,
+                    "listen_port": endpoint.listen_port,
+                    "advertised_ip": endpoint.advertised_ip,
+                    "advertised_port": endpoint.advertised_port,
+                    "transport": endpoint.transport,
+                    "profile_id": endpoint.profile_id,
+                    "profile_version": profile.version if profile is not None else None,
+                    "source_quality": endpoint.source_quality,
+                    "mapping_consistent": mapping_consistent,
+                }
+            )
+        return result
 
     def _event(
         self,
@@ -233,8 +370,9 @@ class SensorListenerService:
 
     async def _record(self, event: Event) -> None:
         try:
-            await asyncio.to_thread(self.runtime.store.append_event, event)
-        except Exception:
+            await asyncio.to_thread(self.runtime.append_event, event)
+        except Exception as exc:
+            self.runtime.mark_storage_failure(f"append failed: {exc}")
             LOGGER.exception("failed to append decoy event to the local buffer")
 
     async def _handle_http(
@@ -446,18 +584,80 @@ class SensorListenerService:
                 pass
 
 
-async def run_sensor_service(runtime: SensorRuntime, *, interval: float = 5.0) -> None:
+async def run_sensor_service(
+    runtime: SensorRuntime,
+    *,
+    interval: float = 5.0,
+    health_interval: float = 30.0,
+) -> None:
     service = SensorListenerService(runtime)
-    started = await service.start()
-    print(json.dumps({"status": "listening", "endpoints": started}, ensure_ascii=False, sort_keys=True), flush=True)
+    initial_state = await asyncio.to_thread(runtime.buffer_state)
+    if initial_state["accepting"]:
+        started = await service.start()
+        print(json.dumps({"status": "listening", "endpoints": started}, ensure_ascii=False, sort_keys=True), flush=True)
+    else:
+        print(
+            json.dumps(
+                {
+                    "status": "buffer_blocked",
+                    "reasons": initial_state["blocked_reasons"],
+                    "message": "decoy listeners stay closed until the buffer recovers",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     previous_status: str | None = None
+    previous_health_status: str | None = None
+    next_health_at = 0.0
     try:
         while True:
-            result = await asyncio.to_thread(runtime.flush_once)
+            state = await asyncio.to_thread(runtime.buffer_state, force=True)
+            if state["accepting"] and not service.is_listening:
+                started = await service.resume_listeners()
+                print(json.dumps({"status": "listening", "endpoints": started}, ensure_ascii=False, sort_keys=True), flush=True)
+            elif not state["accepting"] and service.is_listening:
+                await service.pause_listeners()
+                print(
+                    json.dumps(
+                        {
+                            "status": "buffer_blocked",
+                            "reasons": state["blocked_reasons"],
+                            "message": "decoy listeners were closed to protect evidence",
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+            try:
+                result = await asyncio.to_thread(runtime.flush_once)
+            except Exception as exc:
+                result = {"status": "error", "detail": str(exc)}
             status = str(result.get("status"))
             if status != "empty" and (status != previous_status or status in {"accepted", "duplicate", "rejected"}):
                 print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
             previous_status = status
+
+            now = time.monotonic()
+            if now >= next_health_at:
+                try:
+                    health = await asyncio.to_thread(
+                        runtime.report_health,
+                        endpoint_health=service.health_endpoints(),
+                    )
+                except Exception as exc:
+                    health = {"status": "error", "detail": str(exc)}
+                health_status = str(health.get("status"))
+                if health_status in {"rejected", "error"} or health.get("clock_skew_exceeded"):
+                    print(json.dumps({"health": health}, ensure_ascii=False, sort_keys=True), flush=True)
+                elif health_status != previous_health_status and health_status in {"accepted", "duplicate"}:
+                    print(json.dumps({"health": health}, ensure_ascii=False, sort_keys=True), flush=True)
+                previous_health_status = health_status
+                next_health_at = now + max(5.0, float(health_interval))
+
             await asyncio.sleep(max(1.0, interval))
     finally:
         await service.close()

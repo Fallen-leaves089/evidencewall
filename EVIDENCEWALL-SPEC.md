@@ -1,6 +1,6 @@
 # EvidenceWall 产品与架构规格 v0.1
 
-状态：v0.1 规格已评审；M1、M2、M3 已实现并通过自动化测试，`0.3.0` 为首个公开版本。M3 的证据包、人工复核、Legal Hold 记录、Highwall 导入和 Canary 增量同步已落地；真实多 IP/多端口拓扑和保留期删除任务仍待部署验收。本文不包含实现代码。
+状态：v0.1 规格已评审；M1、M2、M3 已实现并通过自动化测试，`0.4.0` 为可靠性加固版本。证据包、人工复核、Legal Hold 记录、Highwall 导入、Canary 增量同步、签名健康上报和缓冲背压已落地；真实多 IP/多端口拓扑和保留期删除任务仍待部署验收。本文不包含实现代码。
 
 日期：2026-11-08
 
@@ -306,6 +306,10 @@ Endpoint 是一个 `IP:port`。Endpoint Matrix 是同一 Sensor 下的一组端�
 - 时钟偏差超过 60 秒要标记并告警，不静默当成准确时间。
 - 缓冲达到上限时告警并停止接收新诱饵连接，不能静默丢弃旧证据。
 - Collector 必须展示每个 Sensor 和端点的健康状态。
+- `clock_skew_ms` 定义为 `sensor_sent_at - collector_now`：正值表示 Sensor 偏快，负值表示偏慢；绝对偏差大于 60000 ms 时标记超限。
+- Sensor 健康快照通过 `POST /v1/sensors/health` 上报，必须使用已注册 Sensor 私钥签名；Collector 校验 Sensor、Matrix、端点归属和字段边界。
+- 默认缓冲上限为 100000 条未发送事件、512 MiB 缓冲文件和至少 128 MiB 可用磁盘。已确认批次只保留有限本地历史，避免历史总量导致永久阻塞；本地缓冲统计读取失败时按阻断状态处理。SQLite 删除事件后会保留文件高水位，达到字节上限且未发送队列已下降时需 checkpoint/VACUUM 回收，失败时继续阻断并显示原因。
+- Collector 身份密钥缺失、不完整或不匹配时必须拒绝启动，不得静默重建身份。
 
 Collector 必须展示：
 
@@ -409,8 +413,12 @@ Canary 的价值是关联工具链和活动，不是证明具体身份。
 - `profile_ids`
 - `version`
 - `last_seen`
+- `last_health_at`
 - `clock_skew_ms`
 - `queue_depth`
+- `buffer_bytes`
+- `disk_free_bytes`
+- `signature_failures`
 - `status`
 
 ### 15.2 Endpoint
@@ -587,6 +595,7 @@ Case 是给人看的单位；Event 是机器记录的单位。
 |---|---|
 | `POST /v1/sensors/enroll` | Sensor 一次性注册 |
 | `POST /v1/events:batch` | 签名批次上报 |
+| `POST /v1/sensors/health` | Sensor 签名健康、队列、磁盘和时钟偏差上报 |
 | `GET /v1/endpoints` | 端点矩阵和映射状态 |
 | `POST /v1/endpoints/{id}/test` | 端点本地连通性和映射检查 |
 | `GET /v1/cases` | 案件列表 |
@@ -602,7 +611,7 @@ Case 是给人看的单位；Event 是机器记录的单位。
 
 M3 实现状态：
 
-- 已实现：`/healthz`、`/v1/sensors/enroll`、`/v1/events:batch`、`/v1/sensors`、`/v1/endpoints`、`/v1/cases`、`/v1/cases/{id}`、案件复核、Legal Hold、证据导出/校验、`/v1/canaries`、Canary 签名同步、Highwall 导入和查询。
+- 已实现：`/healthz`、`/v1/sensors/enroll`、`/v1/events:batch`、`/v1/sensors/health`、`/v1/sensors`、`/v1/endpoints`、`/v1/cases`、`/v1/cases/{id}`、案件复核、Legal Hold、证据导出/校验、`/v1/canaries`、Canary 签名同步、Highwall 导入和查询。
 - 尚未实现：`/v1/endpoints/{id}/test` 的管理 API 端点（CLI 已有本地端点测试）；管理员认证；保留期删除任务。
 - Collector 是明文 HTTP/1.1，管理接口没有内置独立认证；生产部署必须使用带认证和来源限制的 HTTPS 反向代理。非回环绑定必须显式传入 `--allow-remote`，否则 CLI 拒绝启动。
 
@@ -611,6 +620,7 @@ M3 实现状态：
 - HTTPS。
 - Sensor 出站连接。
 - 批次签名 + 幂等键。
+- 健康快照签名；健康数据属于运行遥测，不进入案件证据链。
 - Collector 不接受任意远程命令。
 - 管理接口使用独立凭据和来源限制（当前尚未内置，需由部署层补足）。
 - 证据导出必须签名并带 manifest；导出动作进入保管链。
@@ -636,7 +646,7 @@ M3 实现状态：
 - `evidencewall retention set`
 - `evidencewall doctor`
 
-M3 已实现：`matrix init`、`endpoint add/list/test`、`sensor init/enroll/run/status`、`collector init/run/status/token rotate`、`profile list`、`canary create/list/rotate/sync`、`case list/show/review/hold/export`、`evidence verify`、`doctor`、`sensor emit-test`。`collector run` 在绑定非回环地址时要求显式 `--allow-remote`。其中 `retention set` 尚未实现；Legal Hold 目前只记录和审计，没有删除任务可被阻止。
+M3 已实现：`matrix init`、`endpoint add/list/test`、`sensor init/enroll/run/status`、`collector init/run/status/token rotate`、`profile list`、`canary create/list/rotate/sync`、`case list/show/review/hold/export`、`evidence verify`、`doctor`、`sensor emit-test`。`sensor run --once` 和 `--flush-only` 均执行一次补传后退出；省略 `--home` 时使用平台用户数据目录，并可由 `EVIDENCEWALL_HOME` 覆盖。`collector run` 在绑定非回环地址时要求显式 `--allow-remote`。其中 `retention set` 尚未实现；Legal Hold 目前只记录和审计，没有删除任务可被阻止。
 
 不在首版做 GUI、托盘程序或嵌入壳。
 

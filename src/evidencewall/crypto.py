@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -110,15 +111,35 @@ def verify_payload(
     return True
 
 
-def _atomic_write(path: Path, data: bytes, mode: int) -> None:
+def atomic_write_bytes(path: Path, data: bytes, mode: int) -> None:
+    """Write a file atomically without creating a world-readable temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_bytes(data)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temp_path = Path(temp_name)
     try:
-        os.chmod(temp, mode)
-    except OSError:
-        pass
-    os.replace(temp, path)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temp_path, mode)
+        except OSError:
+            pass
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_write(path: Path, data: bytes, mode: int) -> None:
+    atomic_write_bytes(path, data, mode)
 
 
 def write_private_key(path: Path, private_key: Ed25519PrivateKey) -> None:
@@ -138,6 +159,30 @@ def load_or_create_identity(identity_dir: Path) -> tuple[Ed25519PrivateKey, Ed25
     )
 
 
+def load_keypair(
+    identity_dir: Path,
+    *,
+    private_name: str,
+    public_name: str,
+    label: str,
+) -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
+    private_path = identity_dir / private_name
+    public_path = identity_dir / public_name
+    has_private = private_path.exists()
+    has_public = public_path.exists()
+    if not has_private and not has_public:
+        raise CryptoError(
+            f"{label} identity is missing: {private_path} and {public_path}"
+        )
+    if has_private != has_public:
+        raise CryptoError(f"incomplete {label} identity: private and public key must both exist")
+    private_key = load_private_key_pem(private_path.read_bytes())
+    public_key = load_public_key_pem(public_path.read_bytes())
+    if public_key_to_pem(public_key) != public_key_to_pem(private_key.public_key()):
+        raise CryptoError(f"{label} public key does not match private key")
+    return private_key, public_key
+
+
 def load_or_create_keypair(
     identity_dir: Path,
     *,
@@ -147,15 +192,13 @@ def load_or_create_keypair(
 ) -> tuple[Ed25519PrivateKey, Ed25519PublicKey, bool]:
     private_path = identity_dir / private_name
     public_path = identity_dir / public_name
-    has_private = private_path.exists()
-    has_public = public_path.exists()
-    if has_private != has_public:
-        raise CryptoError(f"incomplete {label} identity: private and public key must both exist")
-    if has_private:
-        private_key = load_private_key_pem(private_path.read_bytes())
-        public_key = load_public_key_pem(public_path.read_bytes())
-        if public_key_to_pem(public_key) != public_key_to_pem(private_key.public_key()):
-            raise CryptoError(f"{label} public key does not match private key")
+    if private_path.exists() or public_path.exists():
+        private_key, public_key = load_keypair(
+            identity_dir,
+            private_name=private_name,
+            public_name=public_name,
+            label=label,
+        )
         return private_key, public_key, False
     private_key = generate_private_key()
     public_key = private_key.public_key()

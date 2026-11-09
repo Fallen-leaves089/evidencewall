@@ -30,7 +30,7 @@ class CollectorRuntime:
     @classmethod
     def open(cls, home: Path) -> "CollectorRuntime":
         paths, meta = load_collector_home(home)
-        private_key, public_key, _created = load_collector_identity(paths)
+        private_key, public_key = load_collector_identity(paths)
         return cls(paths, meta, private_key, public_key)
 
     def app(self):

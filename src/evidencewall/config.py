@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from . import __version__
 from .crypto import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
+    atomic_write_bytes,
+    load_keypair,
     load_or_create_identity,
     load_or_create_keypair,
     load_private_key_pem,
@@ -19,6 +22,28 @@ from .crypto import (
     sha256_hex,
 )
 from .domain import EndpointMatrix, SCHEMA_VERSION, ValidationError, new_id, utc_now
+
+
+DEFAULT_BUFFER_MAX_EVENTS = 100_000
+DEFAULT_BUFFER_MAX_BYTES = 512 * 1024 * 1024
+DEFAULT_MIN_FREE_DISK_BYTES = 128 * 1024 * 1024
+
+
+def default_data_root() -> Path:
+    override = os.environ.get("EVIDENCEWALL_HOME")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "EvidenceWall"
+        return Path.home() / "AppData" / "Local" / "EvidenceWall"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "EvidenceWall"
+    base = os.environ.get("XDG_DATA_HOME")
+    if base:
+        return Path(base) / "evidencewall"
+    return Path.home() / ".local" / "share" / "evidencewall"
 
 
 @dataclass(frozen=True)
@@ -94,12 +119,13 @@ class CollectorPaths:
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    temp = path.with_name(path.name + ".tmp")
-    with temp.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    atomic_write_bytes(path, text.encode("utf-8"), 0o600)
+
+
+def _positive_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValidationError(f"{field_name} must be a positive integer")
+    return value
 
 
 def read_json_object(path: Path) -> dict[str, Any]:
@@ -120,7 +146,13 @@ def init_sensor_home(
     sensor_id: str | None = None,
     matrix_id: str | None = None,
     collector_url: str | None = None,
+    buffer_max_events: int = DEFAULT_BUFFER_MAX_EVENTS,
+    buffer_max_bytes: int = DEFAULT_BUFFER_MAX_BYTES,
+    min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES,
 ) -> tuple[SensorPaths, dict[str, Any], EndpointMatrix]:
+    buffer_max_events = _positive_int(buffer_max_events, "buffer_max_events")
+    buffer_max_bytes = _positive_int(buffer_max_bytes, "buffer_max_bytes")
+    min_free_disk_bytes = _positive_int(min_free_disk_bytes, "min_free_disk_bytes")
     paths = SensorPaths(home)
     if paths.meta.exists() or paths.matrix.exists() or paths.private_key.exists():
         raise FileExistsError(f"sensor home is already initialized: {paths.root}")
@@ -135,6 +167,9 @@ def init_sensor_home(
         "sensor_id": sensor_id,
         "matrix_id": matrix_id,
         "collector_url": collector_url,
+        "buffer_max_events": buffer_max_events,
+        "buffer_max_bytes": buffer_max_bytes,
+        "min_free_disk_bytes": min_free_disk_bytes,
         "created_at": utc_now(),
         "version": __version__,
     }
@@ -204,9 +239,8 @@ def load_collector_home(home: Path) -> tuple[CollectorPaths, dict[str, Any]]:
 
 def load_collector_identity(
     paths: CollectorPaths,
-) -> tuple[Ed25519PrivateKey, Ed25519PublicKey, bool]:
-    paths.ensure()
-    return load_or_create_keypair(
+) -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
+    return load_keypair(
         paths.identity_dir,
         private_name=paths.private_key.name,
         public_name=paths.public_key.name,

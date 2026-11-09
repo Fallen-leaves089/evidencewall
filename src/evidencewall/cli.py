@@ -15,7 +15,11 @@ from .canary import CanaryStore
 from .collector import CollectorRuntime
 from .config import (
     CollectorPaths,
+    DEFAULT_BUFFER_MAX_BYTES,
+    DEFAULT_BUFFER_MAX_EVENTS,
+    DEFAULT_MIN_FREE_DISK_BYTES,
     SensorPaths,
+    default_data_root,
     init_collector_home,
     init_sensor_home,
     load_sensor_home,
@@ -41,8 +45,9 @@ from .profiles import get_profile, list_profiles
 from .evidence import EvidenceError, export_case_package, verify_package
 
 
-DEFAULT_SENSOR_HOME = Path.cwd() / "evidencewall-data" / "sensor"
-DEFAULT_COLLECTOR_HOME = Path.cwd() / "evidencewall-data" / "collector"
+DEFAULT_DATA_ROOT = default_data_root()
+DEFAULT_SENSOR_HOME = DEFAULT_DATA_ROOT / "sensor"
+DEFAULT_COLLECTOR_HOME = DEFAULT_DATA_ROOT / "collector"
 
 
 def _json(value: Any) -> str:
@@ -99,6 +104,9 @@ def cmd_matrix_init(args: argparse.Namespace) -> int:
         sensor_id=args.sensor_id,
         matrix_id=args.matrix_id,
         collector_url=args.collector_url,
+        buffer_max_events=args.buffer_max_events,
+        buffer_max_bytes=args.buffer_max_bytes,
+        min_free_disk_bytes=args.min_free_disk_bytes,
     )
     print(_json({"status": "initialized", "home": str(paths.root), **meta, "endpoint_count": len(matrix.endpoints)}))
     return 0
@@ -402,7 +410,7 @@ def cmd_sensor_run(args: argparse.Namespace) -> int:
     runtime = _load_runtime(args.home)
     try:
         if args.once or args.flush_only:
-            runtime.flush_loop(interval=args.interval, once=args.once)
+            runtime.flush_loop(interval=args.interval, once=True)
         else:
             asyncio.run(run_sensor_service(runtime, interval=args.interval))
     except KeyboardInterrupt:
@@ -513,6 +521,9 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_init.add_argument("--sensor-id")
     matrix_init.add_argument("--matrix-id")
     matrix_init.add_argument("--collector-url")
+    matrix_init.add_argument("--buffer-max-events", type=int, default=DEFAULT_BUFFER_MAX_EVENTS)
+    matrix_init.add_argument("--buffer-max-bytes", type=int, default=DEFAULT_BUFFER_MAX_BYTES)
+    matrix_init.add_argument("--min-free-disk-bytes", type=int, default=DEFAULT_MIN_FREE_DISK_BYTES)
     matrix_init.set_defaults(func=cmd_matrix_init)
 
     sensor = sub.add_parser("sensor", help="sensor operations")
@@ -522,6 +533,9 @@ def build_parser() -> argparse.ArgumentParser:
     sensor_init.add_argument("--sensor-id")
     sensor_init.add_argument("--matrix-id")
     sensor_init.add_argument("--collector-url")
+    sensor_init.add_argument("--buffer-max-events", type=int, default=DEFAULT_BUFFER_MAX_EVENTS)
+    sensor_init.add_argument("--buffer-max-bytes", type=int, default=DEFAULT_BUFFER_MAX_BYTES)
+    sensor_init.add_argument("--min-free-disk-bytes", type=int, default=DEFAULT_MIN_FREE_DISK_BYTES)
     sensor_init.set_defaults(func=cmd_matrix_init)
 
     sensor_enroll = sensor_sub.add_parser("enroll", help="register sensor with collector")

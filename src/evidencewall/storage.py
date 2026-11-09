@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,8 @@ _HIGHWALL_EXTERNAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,127}$")
 _HIGHWALL_EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _HIGHWALL_SEVERITIES = frozenset({"info", "low", "medium", "high", "critical"})
 _HIGHWALL_TRANSPORTS = frozenset({"tcp", "udp", "tls", "http", "https", "other"})
+CLOCK_SKEW_WARNING_MS = 60_000
+SENT_EVENT_RETENTION = 1_000
 _HIGHWALL_FIELDS = frozenset(
     {
         "external_id",
@@ -95,6 +97,12 @@ def _json_list(value: str | None) -> list[Any]:
         return []
     parsed = json.loads(value)
     return parsed if isinstance(parsed, list) else []
+
+
+def _nonnegative_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationError(f"{field_name} must be a non-negative integer")
+    return value
 
 
 def _bounded_text(value: Any, field_name: str, maximum: int) -> str:
@@ -262,10 +270,19 @@ class SensorStore:
         finally:
             connection.close()
 
-    def append_event(self, event: Event) -> Event:
+    def append_event(self, event: Event, *, max_events: int | None = None) -> Event:
         connection = _connect(self.path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if max_events is not None:
+                pending = connection.execute(
+                    "SELECT COUNT(*) AS count FROM events WHERE sent_at IS NULL"
+                ).fetchone()
+                if int(pending["count"]) >= max_events:
+                    connection.rollback()
+                    raise StorageError(
+                        f"local event buffer has reached its limit ({max_events} unsent events)"
+                    )
             row = connection.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
             sequence = (int(row[0]) if row else 0) + 1
             event = replace(
@@ -378,11 +395,42 @@ class SensorStore:
                 tuple([sent_at, batch_id, *event_sequences]),
             )
             connection.execute("DELETE FROM pending_batches WHERE batch_id = ?", (batch_id,))
+            connection.execute(
+                """
+                DELETE FROM events
+                WHERE sent_at IS NOT NULL
+                  AND sequence NOT IN (
+                      SELECT sequence FROM events
+                      WHERE sent_at IS NOT NULL
+                      ORDER BY sequence DESC
+                      LIMIT ?
+                  )
+                """,
+                (SENT_EVENT_RETENTION,),
+            )
             connection.commit()
             return True
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def reclaim_space(self) -> dict[str, Any]:
+        connection = _connect(self.path)
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+            free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+            vacuumed = free_pages > 0
+            if vacuumed:
+                connection.execute("VACUUM")
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            return {
+                "page_size": page_size,
+                "free_pages": free_pages,
+                "vacuumed": vacuumed,
+            }
         finally:
             connection.close()
 
@@ -439,6 +487,24 @@ class CollectorStore:
                         last_sequence INTEGER NOT NULL DEFAULT 0,
                         status TEXT NOT NULL DEFAULT 'active',
                         metadata_json TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS sensor_health (
+                        sensor_id TEXT PRIMARY KEY,
+                        version TEXT,
+                        health_status TEXT,
+                        clock_skew_ms INTEGER,
+                        clock_skew_exceeded INTEGER,
+                        queue_depth INTEGER,
+                        buffer_bytes INTEGER,
+                        disk_free_bytes INTEGER,
+                        last_health_at TEXT,
+                        health_sent_at TEXT,
+                        endpoint_health_json TEXT,
+                        buffer_json TEXT,
+                        metadata_json TEXT,
+                        signature_failures INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(sensor_id) REFERENCES sensors(sensor_id) ON DELETE CASCADE
                     );
                     CREATE TABLE IF NOT EXISTS endpoints (
                         endpoint_id TEXT PRIMARY KEY,
@@ -838,24 +904,71 @@ class CollectorStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _sensor_health_dict(row: sqlite3.Row) -> dict[str, Any]:
+        endpoint_health = _json_list(row["endpoint_health_json"])
+        buffer = _json_object(row["buffer_json"])
+        health_metadata = _json_object(row["health_metadata_json"])
+        return {
+            "version": row["health_version"],
+            "status": row["health_status"],
+            "clock_skew_ms": row["clock_skew_ms"],
+            "clock_skew_exceeded": (
+                bool(row["clock_skew_exceeded"])
+                if row["clock_skew_exceeded"] is not None
+                else None
+            ),
+            "queue_depth": row["queue_depth"],
+            "buffer_bytes": row["buffer_bytes"],
+            "disk_free_bytes": row["disk_free_bytes"],
+            "last_health_at": row["last_health_at"],
+            "health_sent_at": row["health_sent_at"],
+            "signature_failures": int(row["signature_failures"] or 0),
+            "updated_at": row["health_updated_at"],
+            "endpoints": endpoint_health,
+            "buffer": buffer,
+            "metadata": health_metadata,
+        }
+
+    @classmethod
+    def _sensor_dict(cls, row: sqlite3.Row, *, include_public_key: bool = False) -> dict[str, Any]:
+        result = {
+            "sensor_id": row["sensor_id"],
+            "matrix_id": row["matrix_id"],
+            "registered_at": row["registered_at"],
+            "last_seen": row["last_seen"],
+            "last_sequence": row["last_sequence"],
+            "status": row["status"],
+            "metadata": _json_object(row["metadata_json"]),
+            "health": cls._sensor_health_dict(row),
+        }
+        if include_public_key:
+            result["public_key"] = row["public_key"]
+        return result
+
     def get_sensor(self, sensor_id: str, *, include_public_key: bool = False) -> dict[str, Any] | None:
         connection = _connect(self.path)
         try:
-            row = connection.execute("SELECT * FROM sensors WHERE sensor_id = ?", (sensor_id,)).fetchone()
+            row = connection.execute(
+                """
+                SELECT s.*, h.version AS health_version, h.health_status AS health_status,
+                    h.clock_skew_ms AS clock_skew_ms, h.clock_skew_exceeded AS clock_skew_exceeded,
+                    h.queue_depth AS queue_depth, h.buffer_bytes AS buffer_bytes,
+                    h.disk_free_bytes AS disk_free_bytes, h.last_health_at AS last_health_at,
+                    h.health_sent_at AS health_sent_at,
+                    h.endpoint_health_json AS endpoint_health_json,
+                    h.buffer_json AS buffer_json,
+                    h.metadata_json AS health_metadata_json,
+                    h.signature_failures AS signature_failures, h.updated_at AS health_updated_at
+                FROM sensors s
+                LEFT JOIN sensor_health h ON h.sensor_id = s.sensor_id
+                WHERE s.sensor_id = ?
+                """,
+                (sensor_id,),
+            ).fetchone()
             if not row:
                 return None
-            result = {
-                "sensor_id": row["sensor_id"],
-                "matrix_id": row["matrix_id"],
-                "registered_at": row["registered_at"],
-                "last_seen": row["last_seen"],
-                "last_sequence": row["last_sequence"],
-                "status": row["status"],
-                "metadata": _json_object(row["metadata_json"]),
-            }
-            if include_public_key:
-                result["public_key"] = row["public_key"]
-            return result
+            return self._sensor_dict(row, include_public_key=include_public_key)
         finally:
             connection.close()
 
@@ -863,20 +976,244 @@ class CollectorStore:
         connection = _connect(self.path)
         try:
             rows = connection.execute(
-                "SELECT sensor_id, matrix_id, registered_at, last_seen, last_sequence, status, metadata_json FROM sensors ORDER BY registered_at"
+                """
+                SELECT s.*, h.version AS health_version, h.health_status AS health_status,
+                    h.clock_skew_ms AS clock_skew_ms, h.clock_skew_exceeded AS clock_skew_exceeded,
+                    h.queue_depth AS queue_depth, h.buffer_bytes AS buffer_bytes,
+                    h.disk_free_bytes AS disk_free_bytes, h.last_health_at AS last_health_at,
+                    h.health_sent_at AS health_sent_at,
+                    h.endpoint_health_json AS endpoint_health_json,
+                    h.buffer_json AS buffer_json,
+                    h.metadata_json AS health_metadata_json,
+                    h.signature_failures AS signature_failures, h.updated_at AS health_updated_at
+                FROM sensors s
+                LEFT JOIN sensor_health h ON h.sensor_id = s.sensor_id
+                ORDER BY s.registered_at
+                """
             ).fetchall()
-            return [
-                {
-                    "sensor_id": row["sensor_id"],
-                    "matrix_id": row["matrix_id"],
-                    "registered_at": row["registered_at"],
-                    "last_seen": row["last_seen"],
-                    "last_sequence": row["last_sequence"],
-                    "status": row["status"],
-                    "metadata": _json_object(row["metadata_json"]),
+            return [self._sensor_dict(row) for row in rows]
+        finally:
+            connection.close()
+
+    def record_sensor_health(
+        self,
+        *,
+        sensor_id: str,
+        matrix_id: str,
+        sent_at: str,
+        version: str,
+        health_status: str,
+        queue_depth: int,
+        buffer_bytes: int,
+        disk_free_bytes: int | None,
+        endpoint_health: list[dict[str, Any]],
+        buffer: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        version = _bounded_text(version, "version", 128)
+        if health_status not in {"ok", "degraded", "blocked", "unknown"}:
+            raise ValidationError("health_status must be ok, degraded, blocked, or unknown")
+        queue_depth = _nonnegative_int(queue_depth, "queue_depth")
+        buffer_bytes = _nonnegative_int(buffer_bytes, "buffer_bytes")
+        if disk_free_bytes is not None:
+            disk_free_bytes = _nonnegative_int(disk_free_bytes, "disk_free_bytes")
+        if not isinstance(endpoint_health, list):
+            raise ValidationError("endpoint health must be a list")
+        if len(endpoint_health) > 256:
+            raise ValidationError("endpoint health list exceeds 256 endpoints")
+        if not isinstance(buffer, dict):
+            raise ValidationError("buffer health must be an object")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise ValidationError("health metadata must be an object")
+
+        sent = parse_iso8601(sent_at, "sent_at")
+        now = datetime.now(timezone.utc)
+        collector_time = format_utc(now)
+        clock_skew_ms = int((sent - now).total_seconds() * 1000)
+        clock_skew_exceeded = abs(clock_skew_ms) > CLOCK_SKEW_WARNING_MS
+
+        connection = _connect(self.path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            sensor = connection.execute(
+                "SELECT matrix_id FROM sensors WHERE sensor_id = ?", (sensor_id,)
+            ).fetchone()
+            if sensor is None:
+                connection.rollback()
+                raise StorageError(f"sensor not found: {sensor_id}")
+            if sensor["matrix_id"] != matrix_id:
+                connection.rollback()
+                raise ValidationError("health matrix_id does not match registered sensor")
+
+            endpoint_rows = connection.execute(
+                "SELECT * FROM endpoints WHERE sensor_id = ? ORDER BY endpoint_id", (sensor_id,)
+            ).fetchall()
+            registered = {str(row["endpoint_id"]): row for row in endpoint_rows}
+            normalized_endpoints: list[dict[str, Any]] = []
+            seen_endpoint_ids: set[str] = set()
+            for item in endpoint_health:
+                if not isinstance(item, dict):
+                    connection.rollback()
+                    raise ValidationError("each endpoint health item must be an object")
+                endpoint_id = item.get("endpoint_id")
+                if not isinstance(endpoint_id, str) or endpoint_id not in registered:
+                    connection.rollback()
+                    raise ValidationError(f"health references unknown endpoint: {endpoint_id}")
+                if endpoint_id in seen_endpoint_ids:
+                    connection.rollback()
+                    raise ValidationError(f"duplicate endpoint health entry: {endpoint_id}")
+                seen_endpoint_ids.add(endpoint_id)
+                registered_row = registered[endpoint_id]
+                enabled = item.get("enabled")
+                listening = item.get("listening")
+                if not isinstance(enabled, bool) or not isinstance(listening, bool):
+                    connection.rollback()
+                    raise ValidationError("endpoint health enabled/listening must be booleans")
+                reported = {
+                    "endpoint_id": endpoint_id,
+                    "enabled": enabled,
+                    "listening": listening,
+                    "listen_ip": item.get("listen_ip", registered_row["listen_ip"]),
+                    "listen_port": item.get("listen_port", registered_row["listen_port"]),
+                    "advertised_ip": item.get("advertised_ip", registered_row["advertised_ip"]),
+                    "advertised_port": item.get("advertised_port", registered_row["advertised_port"]),
+                    "transport": item.get("transport", registered_row["transport"]),
+                    "profile_id": item.get("profile_id", registered_row["profile_id"]),
+                    "profile_version": item.get("profile_version"),
+                    "source_quality": item.get("source_quality", registered_row["source_quality"]),
+                    "mapping_consistent": item.get("mapping_consistent"),
                 }
-                for row in rows
-            ]
+                config_matches = all(
+                    reported[field] == registered_row[field]
+                    for field in (
+                        "listen_ip",
+                        "listen_port",
+                        "advertised_ip",
+                        "advertised_port",
+                        "transport",
+                        "profile_id",
+                        "source_quality",
+                    )
+                ) and bool(enabled) == bool(registered_row["enabled"])
+                if registered_row["exposure"] == "direct":
+                    reported["mapping_consistent"] = (
+                        reported["listen_ip"] == reported["advertised_ip"]
+                        and reported["listen_port"] == reported["advertised_port"]
+                    )
+                else:
+                    reported["mapping_consistent"] = None
+                reported["config_matches"] = config_matches
+                normalized_endpoints.append(reported)
+
+            endpoint_json = canonical_json(normalized_endpoints).decode("utf-8")
+            buffer_json = canonical_json(buffer).decode("utf-8")
+            metadata_json = canonical_json(metadata).decode("utf-8")
+            previous = connection.execute(
+                "SELECT health_status, clock_skew_exceeded FROM sensor_health WHERE sensor_id = ?",
+                (sensor_id,),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO sensor_health(
+                    sensor_id, version, health_status, clock_skew_ms, clock_skew_exceeded,
+                    queue_depth, buffer_bytes, disk_free_bytes, last_health_at, health_sent_at,
+                    endpoint_health_json, buffer_json, metadata_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sensor_id) DO UPDATE SET
+                    version = excluded.version,
+                    health_status = excluded.health_status,
+                    clock_skew_ms = excluded.clock_skew_ms,
+                    clock_skew_exceeded = excluded.clock_skew_exceeded,
+                    queue_depth = excluded.queue_depth,
+                    buffer_bytes = excluded.buffer_bytes,
+                    disk_free_bytes = excluded.disk_free_bytes,
+                    last_health_at = excluded.last_health_at,
+                    health_sent_at = excluded.health_sent_at,
+                    endpoint_health_json = excluded.endpoint_health_json,
+                    buffer_json = excluded.buffer_json,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    sensor_id,
+                    version,
+                    health_status,
+                    clock_skew_ms,
+                    1 if clock_skew_exceeded else 0,
+                    queue_depth,
+                    buffer_bytes,
+                    disk_free_bytes,
+                    collector_time,
+                    format_utc(sent),
+                    endpoint_json,
+                    buffer_json,
+                    metadata_json,
+                    collector_time,
+                ),
+            )
+            changed = previous is None
+            if previous is not None:
+                changed = (
+                    previous["health_status"] != health_status
+                    or bool(previous["clock_skew_exceeded"]) != clock_skew_exceeded
+                )
+            if changed:
+                self._audit(
+                    connection,
+                    "sensor_health_changed",
+                    sensor_id,
+                    {
+                        "matrix_id": matrix_id,
+                        "health_status": health_status,
+                        "clock_skew_ms": clock_skew_ms,
+                        "clock_skew_exceeded": clock_skew_exceeded,
+                        "queue_depth": queue_depth,
+                        "buffer_bytes": buffer_bytes,
+                        "disk_free_bytes": disk_free_bytes,
+                    },
+                )
+            connection.commit()
+            return {
+                "status": "accepted",
+                "sensor_id": sensor_id,
+                "collector_time": collector_time,
+                "clock_skew_ms": clock_skew_ms,
+                "clock_skew_exceeded": clock_skew_exceeded,
+                "health_status": health_status,
+            }
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def record_signature_failure(self, sensor_id: str) -> bool:
+        connection = _connect(self.path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            sensor = connection.execute(
+                "SELECT 1 FROM sensors WHERE sensor_id = ?", (sensor_id,)
+            ).fetchone()
+            if sensor is None:
+                connection.rollback()
+                return False
+            connection.execute(
+                """
+                INSERT INTO sensor_health(sensor_id, signature_failures, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(sensor_id) DO UPDATE SET
+                    signature_failures = sensor_health.signature_failures + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (sensor_id, utc_now()),
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -885,31 +1222,72 @@ class CollectorStore:
         try:
             if sensor_id:
                 rows = connection.execute(
-                    "SELECT * FROM endpoints WHERE sensor_id = ? ORDER BY listen_ip, listen_port",
+                    """
+                    SELECT e.*, h.endpoint_health_json AS endpoint_health_json,
+                        h.last_health_at AS health_last_at, h.health_status AS sensor_health_status,
+                        h.version AS sensor_version, h.clock_skew_ms AS clock_skew_ms,
+                        h.clock_skew_exceeded AS clock_skew_exceeded,
+                        h.signature_failures AS signature_failures
+                    FROM endpoints e
+                    LEFT JOIN sensor_health h ON h.sensor_id = e.sensor_id
+                    WHERE e.sensor_id = ?
+                    ORDER BY e.listen_ip, e.listen_port
+                    """,
                     (sensor_id,),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM endpoints ORDER BY sensor_id, listen_ip, listen_port"
+                    """
+                    SELECT e.*, h.endpoint_health_json AS endpoint_health_json,
+                        h.last_health_at AS health_last_at, h.health_status AS sensor_health_status,
+                        h.version AS sensor_version, h.clock_skew_ms AS clock_skew_ms,
+                        h.clock_skew_exceeded AS clock_skew_exceeded,
+                        h.signature_failures AS signature_failures
+                    FROM endpoints e
+                    LEFT JOIN sensor_health h ON h.sensor_id = e.sensor_id
+                    ORDER BY e.sensor_id, e.listen_ip, e.listen_port
+                    """
                 ).fetchall()
-            return [
-                {
-                    "endpoint_id": row["endpoint_id"],
-                    "sensor_id": row["sensor_id"],
-                    "matrix_id": row["matrix_id"],
-                    "listen_ip": row["listen_ip"],
-                    "listen_port": row["listen_port"],
-                    "advertised_ip": row["advertised_ip"],
-                    "advertised_port": row["advertised_port"],
-                    "transport": row["transport"],
-                    "profile_id": row["profile_id"],
-                    "exposure": row["exposure"],
-                    "source_quality": row["source_quality"],
-                    "enabled": bool(row["enabled"]),
-                    "config_version": row["config_version"],
-                }
-                for row in rows
-            ]
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                reported = {}
+                for item in _json_list(row["endpoint_health_json"]):
+                    if isinstance(item, dict) and item.get("endpoint_id") == row["endpoint_id"]:
+                        reported = item
+                        break
+                result.append(
+                    {
+                        "endpoint_id": row["endpoint_id"],
+                        "sensor_id": row["sensor_id"],
+                        "matrix_id": row["matrix_id"],
+                        "listen_ip": row["listen_ip"],
+                        "listen_port": row["listen_port"],
+                        "advertised_ip": row["advertised_ip"],
+                        "advertised_port": row["advertised_port"],
+                        "transport": row["transport"],
+                        "profile_id": row["profile_id"],
+                        "exposure": row["exposure"],
+                        "source_quality": row["source_quality"],
+                        "enabled": bool(row["enabled"]),
+                        "config_version": row["config_version"],
+                        "health_status": row["sensor_health_status"],
+                        "last_health_at": row["health_last_at"],
+                        "sensor_version": row["sensor_version"],
+                        "clock_skew_ms": row["clock_skew_ms"],
+                        "clock_skew_exceeded": (
+                            bool(row["clock_skew_exceeded"])
+                            if row["clock_skew_exceeded"] is not None
+                            else None
+                        ),
+                        "signature_failures": int(row["signature_failures"] or 0),
+                        "listening": reported.get("listening"),
+                        "reported_enabled": reported.get("enabled"),
+                        "profile_version": reported.get("profile_version"),
+                        "mapping_consistent": reported.get("mapping_consistent"),
+                        "config_matches": reported.get("config_matches"),
+                    }
+                )
+            return result
         finally:
             connection.close()
 
@@ -922,8 +1300,7 @@ class CollectorStore:
         event_time = parse_iso8601(event.observed_at, "observed_at")
         window = timedelta(seconds=ASSOCIATION_WINDOW_SECONDS)
         rows = connection.execute(
-            "SELECT * FROM cases WHERE source_quality = ? ORDER BY created_at, case_id",
-            (event.source_quality,),
+            "SELECT * FROM cases ORDER BY created_at, case_id"
         ).fetchall()
         candidates: list[sqlite3.Row] = []
         for row in rows:
@@ -1325,87 +1702,100 @@ class CollectorStore:
         finally:
             connection.close()
 
+    def _case_detail(
+        self,
+        connection: sqlite3.Connection,
+        case_id: str,
+        *,
+        event_order: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
+        if not row:
+            return None
+        case = self._case_dict(row)
+        event_rows = connection.execute(
+            f"""
+            SELECT e.event_json, e.received_at AS collector_received_at, e.batch_id
+            FROM case_events ce
+            JOIN events e ON e.event_id = ce.event_id
+            WHERE ce.case_id = ?
+            ORDER BY {event_order}
+            """,
+            (case_id,),
+        ).fetchall()
+        timeline: list[dict[str, Any]] = []
+        for event_row in event_rows:
+            stored = json.loads(event_row["event_json"])
+            event = Event.from_dict(stored)
+            timeline.append(
+                {
+                    "event_sha256": sha256_hex(canonical_json(event.to_signing_dict())),
+                    **stored,
+                    "received_at": event_row["collector_received_at"],
+                    "batch_id": event_row["batch_id"],
+                }
+            )
+        case["timeline"] = timeline
+        review_rows = connection.execute(
+            "SELECT * FROM case_reviews WHERE case_id = ? ORDER BY created_at, review_id",
+            (case_id,),
+        ).fetchall()
+        case["reviews"] = [
+            {
+                "review_id": row["review_id"],
+                "status": row["status"],
+                "note": row["note"],
+                "actor": row["actor"],
+                "created_at": row["created_at"],
+            }
+            for row in review_rows
+        ]
+        hold_rows = connection.execute(
+            "SELECT * FROM legal_holds WHERE case_id = ? ORDER BY started_at, hold_id",
+            (case_id,),
+        ).fetchall()
+        case["legal_holds"] = [
+            {
+                "hold_id": row["hold_id"],
+                "status": row["status"],
+                "reason": row["reason"],
+                "actor": row["actor"],
+                "started_at": row["started_at"],
+                "expected_until": row["expected_until"],
+                "released_at": row["released_at"],
+                "release_reason": row["release_reason"],
+                "release_actor": row["release_actor"],
+            }
+            for row in hold_rows
+        ]
+        package_rows = connection.execute(
+            "SELECT * FROM evidence_packages WHERE case_id = ? ORDER BY created_at DESC",
+            (case_id,),
+        ).fetchall()
+        case["evidence_packages"] = [
+            {
+                "package_id": row["package_id"],
+                "created_at": row["created_at"],
+                "directory_path": row["directory_path"],
+                "archive_path": row["archive_path"],
+                "manifest_sha256": row["manifest_sha256"],
+                "package_sha256": row["package_sha256"],
+                "status": row["status"],
+                "actor": row["actor"],
+            }
+            for row in package_rows
+        ]
+        case["highwall_events"] = self._case_highwall_events(connection, case_id)
+        return case
+
     def get_case(self, case_id: str) -> dict[str, Any] | None:
         connection = _connect(self.path)
         try:
-            row = connection.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
-            if not row:
-                return None
-            case = self._case_dict(row)
-            event_rows = connection.execute(
-                """
-                SELECT e.event_json, e.received_at AS collector_received_at, e.batch_id
-                FROM case_events ce
-                JOIN events e ON e.event_id = ce.event_id
-                WHERE ce.case_id = ?
-                ORDER BY e.observed_at, e.sequence
-                """,
-                (case_id,),
-            ).fetchall()
-            timeline: list[dict[str, Any]] = []
-            for event_row in event_rows:
-                stored = json.loads(event_row["event_json"])
-                event = Event.from_dict(stored)
-                timeline.append(
-                    {
-                        "event_sha256": sha256_hex(canonical_json(event.to_signing_dict())),
-                        **stored,
-                        "received_at": event_row["collector_received_at"],
-                        "batch_id": event_row["batch_id"],
-                    }
-                )
-            case["timeline"] = timeline
-            review_rows = connection.execute(
-                "SELECT * FROM case_reviews WHERE case_id = ? ORDER BY created_at, review_id",
-                (case_id,),
-            ).fetchall()
-            case["reviews"] = [
-                {
-                    "review_id": row["review_id"],
-                    "status": row["status"],
-                    "note": row["note"],
-                    "actor": row["actor"],
-                    "created_at": row["created_at"],
-                }
-                for row in review_rows
-            ]
-            hold_rows = connection.execute(
-                "SELECT * FROM legal_holds WHERE case_id = ? ORDER BY started_at, hold_id",
-                (case_id,),
-            ).fetchall()
-            case["legal_holds"] = [
-                {
-                    "hold_id": row["hold_id"],
-                    "status": row["status"],
-                    "reason": row["reason"],
-                    "actor": row["actor"],
-                    "started_at": row["started_at"],
-                    "expected_until": row["expected_until"],
-                    "released_at": row["released_at"],
-                    "release_reason": row["release_reason"],
-                    "release_actor": row["release_actor"],
-                }
-                for row in hold_rows
-            ]
-            package_rows = connection.execute(
-                "SELECT * FROM evidence_packages WHERE case_id = ? ORDER BY created_at DESC",
-                (case_id,),
-            ).fetchall()
-            case["evidence_packages"] = [
-                {
-                    "package_id": row["package_id"],
-                    "created_at": row["created_at"],
-                    "directory_path": row["directory_path"],
-                    "archive_path": row["archive_path"],
-                    "manifest_sha256": row["manifest_sha256"],
-                    "package_sha256": row["package_sha256"],
-                    "status": row["status"],
-                    "actor": row["actor"],
-                }
-                for row in package_rows
-            ]
-            case["highwall_events"] = self._case_highwall_events(connection, case_id)
-            return case
+            return self._case_detail(
+                connection,
+                case_id,
+                event_order="e.observed_at, e.sequence",
+            )
         finally:
             connection.close()
 
@@ -1641,12 +2031,48 @@ class CollectorStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _validate_evidence_snapshot(case: dict[str, Any], events: list[dict[str, Any]]) -> None:
+        if not events:
+            raise StorageError("evidence snapshot is inconsistent: case has no events")
+        problems: list[str] = []
+        if case["event_count"] != len(events):
+            problems.append(
+                f"event_count is {case['event_count']} but snapshot contains {len(events)} events"
+            )
+        actual_hashes = {item["event_sha256"] for item in events}
+        if set(case["evidence_hashes"]) != actual_hashes:
+            problems.append("evidence_hashes do not match the linked event hashes")
+        actual_sensor_ids = {str(item["event"]["sensor_id"]) for item in events}
+        actual_endpoint_ids = {str(item["event"]["endpoint_id"]) for item in events}
+        actual_source_ips = {str(item["event"]["source_ip"]) for item in events}
+        if set(case["sensor_ids"]) != actual_sensor_ids:
+            problems.append("sensor_ids do not match the linked events")
+        if set(case["endpoint_ids"]) != actual_endpoint_ids:
+            problems.append("endpoint_ids do not match the linked events")
+        if set(case["source_ips"]) != actual_source_ips:
+            problems.append("source_ips do not match the linked events")
+        observed = [
+            parse_iso8601(str(item["event"]["observed_at"]), "observed_at") for item in events
+        ]
+        if parse_iso8601(case["first_seen"], "first_seen") != min(observed):
+            problems.append("first_seen does not match the earliest linked event")
+        if parse_iso8601(case["last_seen"], "last_seen") != max(observed):
+            problems.append("last_seen does not match the latest linked event")
+        if problems:
+            raise StorageError("evidence snapshot is inconsistent: " + "; ".join(problems))
+
     def evidence_snapshot(self, case_id: str) -> dict[str, Any]:
-        case = self.get_case(case_id)
-        if case is None:
-            raise StorageError(f"case not found: {case_id}")
         connection = _connect(self.path)
         try:
+            connection.execute("BEGIN")
+            case = self._case_detail(
+                connection,
+                case_id,
+                event_order="e.observed_at, e.sensor_id, e.sequence",
+            )
+            if case is None:
+                raise StorageError(f"case not found: {case_id}")
             event_rows = connection.execute(
                 """
                 SELECT e.event_json, e.received_at AS collector_received_at, e.batch_id
@@ -1657,15 +2083,19 @@ class CollectorStore:
                 """,
                 (case_id,),
             ).fetchall()
-            events = [
-                {
-                    "event": json.loads(row["event_json"]),
-                    "event_sha256": event_sha256(Event.from_dict(json.loads(row["event_json"]))),
-                    "batch_id": row["batch_id"],
-                    "collector_received_at": row["collector_received_at"],
-                }
-                for row in event_rows
-            ]
+            events: list[dict[str, Any]] = []
+            for row in event_rows:
+                stored = json.loads(row["event_json"])
+                events.append(
+                    {
+                        "event": stored,
+                        "event_sha256": event_sha256(Event.from_dict(stored)),
+                        "batch_id": row["batch_id"],
+                        "collector_received_at": row["collector_received_at"],
+                    }
+                )
+            self._validate_evidence_snapshot(case, events)
+
             batch_ids = sorted({item["batch_id"] for item in events})
             batches: list[dict[str, Any]] = []
             if batch_ids:
@@ -1697,12 +2127,13 @@ class CollectorStore:
                     }
                     for row in sensor_rows
                 ]
-            reviews = self.list_case_reviews(case_id)
-            holds = self.list_legal_holds(case_id)
+            reviews = case["reviews"]
+            holds = case["legal_holds"]
+            highwall_events = case["highwall_events"]
             review_ids = {item["review_id"] for item in reviews}
             hold_ids = {item["hold_id"] for item in holds}
             linked_highwall_ids = {
-                item["highwall_event_id"] for item in case.get("highwall_events", [])
+                item["highwall_event_id"] for item in highwall_events
             }
             audit_rows = connection.execute(
                 "SELECT id, at, action, actor, detail_json FROM audit_log ORDER BY id"
@@ -1726,16 +2157,21 @@ class CollectorStore:
                             "detail": detail,
                         }
                     )
-            return {
+            result = {
                 "case": case,
                 "events": events,
                 "batches": batches,
                 "sensors": sensors,
                 "reviews": reviews,
                 "legal_holds": holds,
-                "highwall_events": case.get("highwall_events", []),
+                "highwall_events": highwall_events,
                 "custody": custody,
             }
+            connection.commit()
+            return result
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 

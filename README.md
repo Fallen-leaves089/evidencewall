@@ -12,11 +12,11 @@ EvidenceWall 监听诱饵端点收到的流量，记录探测与扫描行为，�
 
 ## 项目状态
 
-`0.3.0` 是首个公开版本。M1/M2/M3 共 25 项自动化测试已在 Python 3.10 和 Python 3.12、干净虚拟环境中通过；CI 配置覆盖 Python 3.11、3.13，以及 Linux 环境。
+`0.4.0` 在 `0.3.0` 基础上完成一轮可靠性加固。当前 39 项自动化测试已在 Python 3.10 环境通过；CI 配置覆盖 Python 3.11、3.13，以及 Linux 环境。
 
 这是**可用但尚未完成生产加固的 public preview**。真实多 IP、多端口拓扑还没有完成 T0/T1 部署验收；当前测试覆盖真实本地 socket 监听、合成流量关联和 Collector API，不代表已经完成公网拓扑验收。面向互联网或不可信网络的部署，请先阅读“安全边界与当前限制”。
 
-## v0.3.0 已实现
+## 当前已实现
 
 - 真实 HTTP/1.1 诱饵监听：有界读取请求，记录方法、Host、路径、Headers 指纹、请求体哈希、来源与目的 socket 地址、首包特征、响应状态和 tarpit 时长。
 - 通用 TCP 元数据监听：有界读取首包，记录首包长度与 SHA-256、来源与目的地址、advertised 映射和 tarpit 时长，不保存完整正文。
@@ -30,13 +30,17 @@ EvidenceWall 监听诱饵端点收到的流量，记录探测与扫描行为，�
 - Legal Hold：持久化保留原因、操作者和期限；解除必须显式确认并留审计。
 - Highwall 兼容：导入白名单化的审计事件，去除查询串、片段和任意头部/正文，只作为辅助佐证，不单独创建案件。
 - Canary 增量同步：Sensor 用自身 Ed25519 私钥签名公开部署映射和哈希快照，Collector 验证签名并处理轮换。
+- 签名健康上报：Sensor 周期上报状态、待传队列、缓冲占用、磁盘余量、版本和端点监听状态；Collector 计算 `sent_at - collector_now` 时钟偏差，绝对偏差超过 60 秒时标记告警。
+- 缓冲背压：Sensor 对事件数、缓冲字节数和磁盘余量设置默认上限；达到上限或最近写入失败时停止接收新事件并关闭诱饵监听，恢复后再自动重新监听。
+- 失败关闭：Collector 密钥缺失、只存在一个密钥文件或公私钥不匹配时拒绝启动，不再静默生成新身份。
+- 证据一致性：Evidence Package 导出前在单个 SQLite 读事务中读取案件、事件、批次、Sensor、复核、Legal Hold 和保管记录，并校验案件摘要与事件集合一致；不一致时拒绝导出。
 - Collector 独立身份：首次初始化生成 Ed25519 密钥；证据包只包含公钥，私钥不得进入证据包。
 - CLI：`profile list`、`canary create/list/rotate`、`case list/show`、真实监听入口 `sensor run`，以及 M1 的矩阵、身份、注册、缓冲和上报命令。
-- Collector API：案件列表/详情、复核、Legal Hold、导出、证据校验、Canary 同步和 Highwall 导入已接入真实存储。
+- Collector API：案件列表/详情、复核、Legal Hold、导出、证据校验、Canary 同步、Sensor 健康上报和 Highwall 导入已接入真实存储。
 
 ## 快速开始
 
-以下命令以项目根目录为工作目录。数据目录全部由 `--home` 指定，不依赖当前工作目录或用户主目录。
+以下示例显式使用项目本地的 `--home` 目录，便于开发排障。省略 `--home` 时，默认数据目录不再依赖当前工作目录或 Codex 工作区：Windows 为 `%LOCALAPPDATA%\EvidenceWall`，Linux 为 `$XDG_DATA_HOME/evidencewall`（未设置时为 `~/.local/share/evidencewall`），macOS 为 `~/Library/Application Support/EvidenceWall`；也可用环境变量 `EVIDENCEWALL_HOME` 统一覆盖。生产环境建议显式固定 `--home`。
 
 建议先创建虚拟环境：
 
@@ -157,9 +161,15 @@ evidencewall profile list
 evidencewall canary list --home .\evidencewall-data\sensor --json
 evidencewall sensor status --home .\evidencewall-data\sensor
 evidencewall doctor --home .\evidencewall-data\sensor --json
+
+# Collector 侧查看 Sensor、端点健康、队列、磁盘和时钟偏差
+Invoke-RestMethod http://127.0.0.1:8787/v1/sensors
+Invoke-RestMethod http://127.0.0.1:8787/v1/endpoints
 ```
 
-`sensor run --once` 和 `sensor run --flush-only` 只执行缓冲上报，不启动监听；用于排障或定时补传。
+Sensor 周期向 `POST /v1/sensors/health` 发送签名健康快照。`clock_skew_ms` 定义为 `sensor_sent_at - collector_now`：正值表示 Sensor 时间偏快，负值表示偏慢；绝对偏差超过 60000 ms 时 `clock_skew_exceeded` 为 `true`。默认缓冲限制为 100000 条未发送事件、512 MiB 缓冲文件和至少 128 MiB 可用磁盘；达到限制时 Sensor 会停止接收新事件并暂停监听，已确认的旧事件只保留有限历史。SQLite 文件高水位会让字节上限在删除后仍显示占满；Sensor 会在队列下降后尝试安全压缩，压缩失败则继续阻断并报告原因。
+
+`sensor run --once` 和 `sensor run --flush-only` 都只执行一次缓冲上报后退出，不启动监听；用于排障或由外部定时器补传。
 
 ## 内置 Profile
 
@@ -177,6 +187,8 @@ evidencewall doctor --home .\evidencewall-data\sensor --json
 - Collector 传输是明文 HTTP/1.1，代码本身不提供 TLS。远程部署必须由受控 HTTPS 反向代理补足。
 - HTTP 诱饵是明文 HTTP/1.1，不包含 TLS 终止。HTTPS 诱饵和可信代理头处理属于后续工作；不要把经过代理的来源自动当作直接来源。
 - Canary 部署映射可在注册后通过签名同步更新；同步只发送公开部署映射和 token 哈希，不发送原始 token。
+- Sensor 健康上报必须由已注册 Sensor 的私钥签名；Collector 拒绝未知端点、矩阵不匹配和签名错误的上报，并累计签名失败次数。健康数据是运行遥测，不替代案件证据。
+- 缓冲达到数量、字节或低磁盘阈值时 Sensor 采用失败关闭：拒绝新事件并暂停监听，不会静默丢弃最早证据；恢复后自动重新监听。
 - Legal Hold 当前只是持久化保留记录、审计和显式确认解除。**本版本没有保留期删除任务，因此无法宣称自动删除已被可靠阻止。** 在保留期清理功能实现前，不要手工删除处于 active 状态的案件、事件或证据包；后续删除任务必须先查询 active Legal Hold 并拒绝删除。
 - 真实多 IP、多端口拓扑尚未完成部署验收；当前只验证了本地真实 socket 监听、API、关联逻辑和证据包流程。WSL、路由器和代理环境的来源 IP、广告映射和 NAT 行为需要单独验收。
 - 不保存完整正文、Cookie、Authorization 或真实密钥；只保留受限元数据、长度和哈希。
@@ -184,7 +196,8 @@ evidencewall doctor --home .\evidencewall-data\sensor --json
 - 不做 UI、托盘程序、生产流量镜像或 inline 代理。
 - Highwall 是可选辅助入口，不是运行依赖。本项目不修改 Highwall 仓库；导入事件不创建案件、不自动回写封禁规则，也不被独立上游签名验证。
 - 证据包自带 Collector 公钥只能证明包内自洽；对抗性校验或第三方移交必须固定可信 Collector 公钥，否则无法抵抗连同公钥整体替换。
-- Windows 上 `os.chmod` 不能提供完整 ACL 保护；请把数据目录放在仅当前用户可读写的路径，并用 ACL 限制访问。
+- Windows 上 `os.chmod` 不能提供完整 ACL 保护；原子写入虽然避免半写文件，但不能替代目录 ACL。请把数据目录放在仅当前用户可读写的路径，并显式配置 ACL。
+- 省略 `--home` 时，默认数据目录位于平台用户数据目录，而不是当前项目目录或 Codex 工作区；使用 `EVIDENCEWALL_HOME` 可显式覆盖。
 - 批次号或事件号被复用但签名内容不同，会被 Collector 拒绝，不会被误报为重复成功。
 
 ## 测试
@@ -194,7 +207,7 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-当前共 25 项测试，覆盖签名、注册、断网缓冲、批次重试、幂等、Canary、HTTP/TCP 监听、跨来源关联、Highwall 导入、证据包导出/篡改、Legal Hold、远程绑定保护、API 与 CLI 错误处理。
+当前共 39 项测试，覆盖签名、注册、断网缓冲、批次重试、幂等、Canary、HTTP/TCP 监听、跨来源关联、混合 `direct`/`nat` Canary 合并、健康上报与时钟偏差、缓冲数量/字节/低磁盘上限、SQLite 高水位回收、缓冲存储故障止损、连接取消清理、旧库迁移、证据快照一致性、Highwall 导入、证据包导出/篡改、Legal Hold、远程绑定保护、API 与 CLI 错误处理。
 
 ## 目录结构
 

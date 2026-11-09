@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,7 @@ from urllib.parse import unquote
 from .crypto import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
+    atomic_write_bytes,
     canonical_json,
     sha256_hex,
     sign_payload,
@@ -165,16 +165,7 @@ class CanaryStore:
             "groups": [group.to_dict() for group in self.groups],
         }
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        temp = self.path.with_name(self.path.name + ".tmp")
-        with temp.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.chmod(temp, 0o600)
-        except OSError:
-            pass
-        os.replace(temp, self.path)
+        atomic_write_bytes(self.path, text.encode("utf-8"), 0o600)
 
     def create(self, token_type: str, endpoint_ids: list[str]) -> CanaryGroup:
         if token_type not in CANARY_TYPES:
