@@ -7,7 +7,6 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 MAX_ENDPOINTS = 256
 TRANSPORTS = frozenset({"http1", "tcp"})

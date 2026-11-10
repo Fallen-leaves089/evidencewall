@@ -31,7 +31,6 @@ from .net import NetworkError, get_json, normalize_base_url, post_json
 from .profiles import get_profile
 from .storage import SensorStore
 
-
 HEALTH_SCHEMA_VERSION = 1
 CLOCK_SKEW_WARNING_MS = 60_000
 BUFFER_CACHE_SECONDS = 1.0

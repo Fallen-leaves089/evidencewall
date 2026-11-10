@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from .domain import TRANSPORTS, ValidationError
-
 
 PROFILE_SCHEMA_VERSION = 1
 MAX_ROUTES = 64

@@ -7,7 +7,6 @@ from typing import Any
 from .crypto import canonical_json, sha256_hex
 from .domain import Event, ValidationError, format_utc, parse_iso8601
 
-
 ASSOCIATION_WINDOW_SECONDS = 24 * 60 * 60
 SERVICE_TARGET_MIN_EVENTS = 3
 DISTRIBUTED_MIN_SOURCES = 2

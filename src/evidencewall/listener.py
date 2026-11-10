@@ -14,7 +14,6 @@ from .domain import Endpoint, Event, ValidationError, new_id, utc_now
 from .profiles import HttpProfile, TcpProfile, get_profile
 from .sensor import SensorRuntime
 
-
 LOGGER = logging.getLogger(__name__)
 HTTP_READ_TIMEOUT_SECONDS = 2.0
 MAX_HEADER_BYTES = 32 * 1024

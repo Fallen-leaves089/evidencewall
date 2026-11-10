@@ -14,11 +14,9 @@ from . import __version__
 from .canary import CanaryStore
 from .collector import CollectorRuntime
 from .config import (
-    CollectorPaths,
     DEFAULT_BUFFER_MAX_BYTES,
     DEFAULT_BUFFER_MAX_EVENTS,
     DEFAULT_MIN_FREE_DISK_BYTES,
-    SensorPaths,
     default_data_root,
     init_collector_home,
     init_sensor_home,
@@ -28,8 +26,8 @@ from .config import (
 )
 from .crypto import CryptoError, load_public_key_pem
 from .domain import (
-    CASE_STATUSES,
     CANARY_TYPES,
+    CASE_STATUSES,
     DEFAULT_SOURCE_QUALITY,
     EXPOSURES,
     SOURCE_QUALITIES,
@@ -38,12 +36,11 @@ from .domain import (
     ValidationError,
     new_id,
 )
-from .sensor import SensorError, SensorRuntime
-from .storage import StorageError
+from .evidence import EvidenceError, export_case_package, verify_package
 from .listener import ListenerError, run_sensor_service
 from .profiles import get_profile, list_profiles
-from .evidence import EvidenceError, export_case_package, verify_package
-
+from .sensor import SensorError, SensorRuntime
+from .storage import StorageError
 
 DEFAULT_DATA_ROOT = default_data_root()
 DEFAULT_SENSOR_HOME = DEFAULT_DATA_ROOT / "sensor"

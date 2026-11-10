@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import io
-import json
 import socket
 import tempfile
 import threading
@@ -11,13 +10,13 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from fastapi.testclient import TestClient
 import uvicorn
+from fastapi.testclient import TestClient
 
 from evidencewall.batch import build_batch, verify_batch
 from evidencewall.cli import main
 from evidencewall.collector import CollectorRuntime
-from evidencewall.config import init_collector_home, init_sensor_home, load_sensor_home, save_matrix
+from evidencewall.config import init_collector_home, init_sensor_home, save_matrix
 from evidencewall.crypto import (
     canonical_json,
     generate_private_key,
@@ -28,9 +27,9 @@ from evidencewall.crypto import (
     verify_payload,
 )
 from evidencewall.domain import Endpoint, EndpointMatrix, Event, ValidationError
+from evidencewall.net import get_json
 from evidencewall.sensor import SensorRuntime
 from evidencewall.storage import CollectorStore, SequenceError, StorageConflict
-from evidencewall.net import get_json
 
 
 def add_test_endpoint(home: Path, *, port: int = 18080, advertised_port: int = 18080) -> tuple:
@@ -231,7 +230,7 @@ class CollectorStoreTests(unittest.TestCase):
             self.assertIsNotNone(store.get_sensor(meta["sensor_id"]))
             self.assertEqual(len(store.list_endpoints()), 1)
 
-            first = runtime.enqueue_test_event(path="/.env")
+            runtime.enqueue_test_event(path="/.env")
             events = runtime.store.get_unsent_events(10)
             batch = build_batch(events, runtime.private_key, runtime.sensor_id, runtime.matrix_id)
             verified = verify_batch(runtime.public_key, batch)
@@ -241,7 +240,7 @@ class CollectorStoreTests(unittest.TestCase):
             duplicate = store.ingest_batch(batch, verified)
             self.assertEqual(duplicate["status"], "duplicate")
 
-            second = runtime.enqueue_test_event(path="/admin")
+            runtime.enqueue_test_event(path="/admin")
             events2 = runtime.store.get_unsent_events(10)
             batch2 = build_batch(events2, runtime.private_key, runtime.sensor_id, runtime.matrix_id)
             verified2 = verify_batch(runtime.public_key, batch2)

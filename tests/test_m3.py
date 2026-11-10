@@ -18,16 +18,13 @@ from evidencewall.cli import main
 from evidencewall.collector import CollectorRuntime
 from evidencewall.config import init_collector_home, init_sensor_home, save_matrix
 from evidencewall.crypto import (
-    canonical_json,
     public_key_text,
     sha256_hex,
-    sign_payload,
 )
 from evidencewall.domain import Endpoint, Event, ValidationError, format_utc, parse_iso8601
 from evidencewall.evidence import EvidenceError, export_case_package, verify_package
 from evidencewall.sensor import SensorRuntime
 from evidencewall.storage import CollectorStore, StorageConflict
-
 
 BASE_TIME = datetime(2026, 11, 8, 0, 0, tzinfo=timezone.utc)
 
