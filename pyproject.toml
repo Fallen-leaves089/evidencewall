@@ -47,6 +47,7 @@ Security = "https://github.com/Fallen-leaves089/evidencewall/security/policy"
 
 [project.optional-dependencies]
 test = ["httpx>=0.27"]
+quality = ["coverage==7.16.2", "ruff==0.17.4"]
 release = ["build>=1.2", "twine>=5"]
 
 [project.scripts]
@@ -57,4 +58,20 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 evidencewall = ["profiles/*.json"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.coverage.run]
+branch = true
+source = ["evidencewall"]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+fail_under = 70
 

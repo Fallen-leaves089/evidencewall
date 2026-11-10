@@ -8,7 +8,6 @@ from typing import Any
 from . import __version__
 from .crypto import canonical_json
 
-
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 

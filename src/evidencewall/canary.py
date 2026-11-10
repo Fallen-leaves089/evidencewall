@@ -17,14 +17,13 @@ from .crypto import (
 )
 from .domain import (
     CANARY_TYPES,
-    CanaryGroup,
     CanaryDeployment,
+    CanaryGroup,
     ValidationError,
     new_id,
     parse_iso8601,
     utc_now,
 )
-
 
 SCHEMA_VERSION = 1
 MAX_CANARY_GROUPS = 256

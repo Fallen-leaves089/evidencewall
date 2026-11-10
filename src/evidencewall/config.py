@@ -21,8 +21,7 @@ from .crypto import (
     public_key_to_pem,
     sha256_hex,
 )
-from .domain import EndpointMatrix, SCHEMA_VERSION, ValidationError, new_id, utc_now
-
+from .domain import SCHEMA_VERSION, EndpointMatrix, ValidationError, new_id, utc_now
 
 DEFAULT_BUFFER_MAX_EVENTS = 100_000
 DEFAULT_BUFFER_MAX_BYTES = 512 * 1024 * 1024

@@ -13,15 +13,14 @@ from .crypto import (
     Ed25519PublicKey,
     canonical_json,
     load_public_key_text,
-    public_key_to_pem,
     public_key_text,
+    public_key_to_pem,
     sha256_hex,
     sign_payload,
     verify_payload,
 )
 from .domain import Event, ValidationError, new_id, parse_iso8601, utc_now
 from .storage import CollectorStore
-
 
 PACKAGE_SCHEMA = "evidencewall.evidence-package.v1"
 CORE_PACKAGE_FILES = (

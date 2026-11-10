@@ -5,7 +5,8 @@ from typing import Annotated, Any, Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from . import __version__
 from .batch import verify_batch
@@ -21,7 +22,6 @@ from .crypto import (
 from .domain import Endpoint, ValidationError, utc_now
 from .evidence import EvidenceError, export_case_package, verify_package
 from .storage import CollectorStore, SequenceError, StorageConflict, StorageError
-
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 

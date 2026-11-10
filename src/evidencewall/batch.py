@@ -5,8 +5,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from .crypto import canonical_json, sha256_hex, sign_payload, verify_payload
-from .domain import Event, SCHEMA_VERSION, ValidationError, new_id, parse_iso8601, utc_now
-
+from .domain import SCHEMA_VERSION, Event, ValidationError, new_id, parse_iso8601, utc_now
 
 MAX_BATCH_EVENTS = 500
 BATCH_FIELDS = {
