@@ -56,7 +56,14 @@ evidencewall collector init --home .\evidencewall-data\collector
 evidencewall collector run --home .\evidencewall-data\collector --host 127.0.0.1 --port 8787
 ```
 
-Collector 默认只监听回环地址。若必须跨主机访问，请先放在带认证、TLS 和来源限制的反向代理后，再显式增加 `--allow-remote`；直接绑定 `0.0.0.0` 会被拒绝。
+Collector 默认只监听回环地址。绑定非回环地址时必须同时显式传入 `--allow-remote` 和管理员 Token（推荐 `--admin-token-stdin`，避免令牌出现在进程命令行），缺少任一条件都会拒绝启动。配置后，管理员 Token 默认保护除 `/healthz` 和 Sensor 接入路由外的所有 HTTP 路由，但不替代 TLS 和来源限制；跨主机部署仍必须放在受控 HTTPS 反向代理和网络 ACL 后。
+
+```powershell
+$env:EVIDENCEWALL_ADMIN_TOKEN = "<从密钥管理系统注入的随机令牌>"
+$env:EVIDENCEWALL_ADMIN_TOKEN | evidencewall collector run `
+  --home .\evidencewall-data\collector `
+  --host 0.0.0.0 --port 8787 --allow-remote --admin-token-stdin
+```
 
 另开终端，初始化 Sensor、端点矩阵和 Canary，然后注册并启动真实监听：
 
@@ -182,7 +189,7 @@ Sensor 周期向 `POST /v1/sensors/health` 发送签名健康快照。`clock_ske
 
 ## 安全边界与当前限制
 
-- Collector 默认只绑定 `127.0.0.1`，且绑定非回环地址必须显式传入 `--allow-remote`。管理接口仍未内置独立管理员认证；不要直接暴露公网，必须保持回环访问，或放在带认证、TLS 和来源限制的反向代理后。
+- Collector 默认只绑定 `127.0.0.1`，且绑定非回环地址必须同时传入 `--allow-remote` 和管理员 Token。Token 通过 `--admin-token-stdin`（推荐）或 `--admin-token` 提供；配置后默认保护除 `/healthz` 和明确列出的 Sensor 接入路由外的所有 HTTP 路由。Sensor 路由继续使用各自的注册或签名校验。Token 只存在于进程内，不提供持久化、权限分级或自动轮换。代码仍不终止 TLS，远程部署必须放在受控 HTTPS 反向代理和来源限制后。
 - Highwall 导入接口属于管理面；未认证暴露会允许他人注入辅助证据，必须和案件查询接口一起放在认证与来源限制之后。
 - Collector 传输是明文 HTTP/1.1，代码本身不提供 TLS。远程部署必须由受控 HTTPS 反向代理补足。
 - HTTP 诱饵是明文 HTTP/1.1，不包含 TLS 终止。HTTPS 诱饵和可信代理头处理属于后续工作；不要把经过代理的来源自动当作直接来源。

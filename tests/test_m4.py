@@ -176,6 +176,46 @@ class SensorHealthApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
 
 
+class AdminApiAuthTests(unittest.TestCase):
+    def test_management_api_requires_bearer_token_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            init_collector_home(Path(temp) / "collector")
+            collector = CollectorRuntime.open(Path(temp) / "collector")
+            client = TestClient(collector.app(admin_token="admin-secret"))
+
+            self.assertEqual(client.get("/healthz").status_code, 200)
+            self.assertEqual(client.get("/openapi.json").status_code, 401)
+            self.assertEqual(client.get("/v1/cases").status_code, 401)
+            self.assertEqual(
+                client.get("/v1/cases", headers={"Authorization": "Bearer wrong"}).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.get("/v1/cases", headers={"Authorization": "Bearer admin-secret"}).status_code,
+                200,
+            )
+            self.assertEqual(
+                client.get("/openapi.json", headers={"Authorization": "Bearer admin-secret"}).status_code,
+                200,
+            )
+            # Sensor ingress remains protected by enrollment or signed payloads, not the admin token.
+            for path in (
+                "/v1/sensors/enroll",
+                "/v1/events:batch",
+                "/v1/sensors/health",
+                "/v1/sensors/canaries",
+            ):
+                self.assertNotEqual(client.post(path, json={}).status_code, 401, path)
+
+    def test_management_api_stays_open_when_no_admin_token_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            init_collector_home(Path(temp) / "collector")
+            collector = CollectorRuntime.open(Path(temp) / "collector")
+            client = TestClient(collector.app())
+
+            self.assertEqual(client.get("/v1/cases").status_code, 200)
+
+
 class SensorBufferLimitTests(unittest.TestCase):
     def test_event_limit_blocks_until_acknowledged_batch_is_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -428,6 +468,55 @@ class EvidenceSnapshotConsistencyTests(unittest.TestCase):
 
 
 class CliAndPathTests(unittest.TestCase):
+    def test_remote_collector_requires_admin_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "collector"
+            init_collector_home(home)
+
+            self.assertEqual(
+                main([
+                    "collector",
+                    "run",
+                    "--home",
+                    str(home),
+                    "--host",
+                    "0.0.0.0",
+                    "--allow-remote",
+                ]),
+                2,
+            )
+
+    def test_remote_collector_reads_admin_token_from_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "collector"
+            init_collector_home(home)
+
+            with patch("uvicorn.run") as run, patch("sys.stdin.readline", return_value="stdin-secret\n"):
+                self.assertEqual(
+                    main([
+                        "collector",
+                        "run",
+                        "--home",
+                        str(home),
+                        "--host",
+                        "0.0.0.0",
+                        "--allow-remote",
+                        "--admin-token-stdin",
+                    ]),
+                    0,
+                )
+
+            app = run.call_args.args[0]
+            client = TestClient(app)
+            self.assertEqual(client.get("/v1/cases").status_code, 401)
+            self.assertEqual(
+                client.get(
+                    "/v1/cases",
+                    headers={"Authorization": "Bearer stdin-secret"},
+                ).status_code,
+                200,
+            )
+
     def test_flush_only_runs_one_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "sensor"

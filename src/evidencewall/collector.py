@@ -33,7 +33,7 @@ class CollectorRuntime:
         private_key, public_key = load_collector_identity(paths)
         return cls(paths, meta, private_key, public_key)
 
-    def app(self):
+    def app(self, *, admin_token: str | None = None):
         from .server import create_app
 
         return create_app(
@@ -42,6 +42,7 @@ class CollectorRuntime:
             private_key=self.private_key,
             public_key=self.public_key,
             exports_dir=self.paths.exports,
+            admin_token=admin_token,
         )
 
     def status(self) -> dict[str, Any]:

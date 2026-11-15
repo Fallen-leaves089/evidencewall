@@ -26,7 +26,7 @@ EvidenceWall 是安全工具，但它本身仍处于 **public preview** 阶段�
 
 以下限制是当前版本的已知边界，不应被误解为已经解决：
 
-- Collector 管理 API 没有内置管理员认证和 TLS。默认只允许回环绑定；非回环绑定必须显式使用 `--allow-remote`，并且只能放在带认证、TLS 和来源限制的反向代理后。
+- Collector 仅在配置管理员 Bearer Token 后启用内置认证；配置后默认保护除 `/healthz` 和明确列出的 Sensor 接入路由外的所有 HTTP 路由。非回环绑定强制要求 `--allow-remote` 和 Token，否则 CLI 拒绝启动。Token 通过 `--admin-token-stdin`（推荐）或 `--admin-token` 提供，只存在于进程内，不提供持久化、权限分级或自动轮换。代码不终止 TLS，远程部署仍必须使用受控 HTTPS 反向代理和来源限制；默认回环且未配置 Token 的本地模式保持无认证。
 - Collector 和 Sensor 之间的上报链路在代码层面是明文 HTTP；远程部署必须由受控 HTTPS 反向代理补足。
 - Highwall 导入只是白名单化的辅助记录，没有 Highwall 上游签名，也不会单独创建案件或回写封禁规则。
 - Legal Hold 当前只持久化记录、审计和显式确认解除；尚无保留期删除任务，因此不能宣称自动删除已被可靠阻止。
