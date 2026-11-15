@@ -432,22 +432,37 @@ def cmd_collector_init(args: argparse.Namespace) -> int:
 
 def cmd_collector_run(args: argparse.Namespace) -> int:
     runtime = CollectorRuntime.open(args.home)
+    admin_token = args.admin_token
+    if args.admin_token_stdin:
+        admin_token = sys.stdin.readline().strip()
+    if admin_token is not None:
+        admin_token = admin_token.strip()
+        if not admin_token:
+            print("error: admin token must not be empty", file=sys.stderr)
+            return 2
     if not _is_loopback_bind(args.host) and not args.allow_remote:
         print(
             "error: refusing to bind collector to a non-loopback address without --allow-remote; "
-            "the management API has no built-in authentication or TLS",
+            "the management API requires an admin token and TLS",
             file=sys.stderr,
         )
         return 2
     if not _is_loopback_bind(args.host):
+        if admin_token is None:
+            print(
+                "error: --allow-remote requires --admin-token or --admin-token-stdin; "
+                "refusing to expose the management API without authentication",
+                file=sys.stderr,
+            )
+            return 2
         print(
-            "warning: collector is exposed beyond loopback; put it behind HTTPS, authentication, "
-            "and source-address restrictions",
+            "warning: collector is exposed beyond loopback; admin Token authentication is enabled, "
+            "but HTTPS and source-address restrictions are still required",
             file=sys.stderr,
         )
     import uvicorn
 
-    uvicorn.run(runtime.app(), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(runtime.app(admin_token=admin_token), host=args.host, port=args.port, log_level="info")
     return 0
 
 
@@ -635,7 +650,17 @@ def build_parser() -> argparse.ArgumentParser:
     collector_run.add_argument(
         "--allow-remote",
         action="store_true",
-        help="allow binding to a non-loopback address; only use behind an authenticated TLS proxy",
+        help="allow binding to a non-loopback address; requires an admin token and still needs TLS",
+    )
+    collector_auth = collector_run.add_mutually_exclusive_group()
+    collector_auth.add_argument(
+        "--admin-token",
+        help="bearer token for management API authentication; prefer --admin-token-stdin",
+    )
+    collector_auth.add_argument(
+        "--admin-token-stdin",
+        action="store_true",
+        help="read the management API bearer token from standard input",
     )
     collector_run.set_defaults(func=cmd_collector_run)
 

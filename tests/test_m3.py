@@ -573,6 +573,8 @@ class CliM3Tests(unittest.TestCase):
                             "--host",
                             "0.0.0.0",
                             "--allow-remote",
+                            "--admin-token",
+                            "test-admin-token",
                         ]
                     )
             self.assertEqual(allowed, 0)

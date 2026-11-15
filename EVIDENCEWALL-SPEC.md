@@ -575,7 +575,7 @@ Case 是给人看的单位；Event 是机器记录的单位。
 - 不提供 Sensor 命令通道。
 - 不执行 Sensor 提交的任何代码或模板逻辑。
 - 管理 API 和接入 API 分开。
-- 当前实现：管理查询与上报共用一个 FastAPI 应用，且没有内置管理员认证；生产环境必须放在带认证、TLS 和来源限制的反向代理后，或只绑定回环地址。
+- 当前实现：管理查询与上报共用一个 FastAPI 应用；可配置管理员 Bearer Token，配置后默认保护除 `/healthz` 和明确列出的 Sensor 接入路由外的全部 HTTP 路由。非回环绑定强制要求管理员 Token。默认回环且未配置 Token 时保持本地无认证模式；生产环境仍必须由部署层补足 TLS 和来源限制。
 - 证据存储只追加，定期校验哈希链并备份。
 - 最小权限、速率限制、审计和备份。
 - 与生产网络、生产凭据隔离。
@@ -611,9 +611,9 @@ Case 是给人看的单位；Event 是机器记录的单位。
 
 M3 实现状态：
 
-- 已实现：`/healthz`、`/v1/sensors/enroll`、`/v1/events:batch`、`/v1/sensors/health`、`/v1/sensors`、`/v1/endpoints`、`/v1/cases`、`/v1/cases/{id}`、案件复核、Legal Hold、证据导出/校验、`/v1/canaries`、Canary 签名同步、Highwall 导入和查询。
-- 尚未实现：`/v1/endpoints/{id}/test` 的管理 API 端点（CLI 已有本地端点测试）；管理员认证；保留期删除任务。
-- Collector 是明文 HTTP/1.1，管理接口没有内置独立认证；生产部署必须使用带认证和来源限制的 HTTPS 反向代理。非回环绑定必须显式传入 `--allow-remote`，否则 CLI 拒绝启动。
+- 已实现：`/healthz`、`/v1/sensors/enroll`、`/v1/events:batch`、`/v1/sensors/health`、`/v1/sensors`、`/v1/endpoints`、`/v1/cases`、`/v1/cases/{id}`、案件复核、Legal Hold、证据导出/校验、`/v1/canaries`、Canary 签名同步、Highwall 导入和查询，以及可选管理员 Bearer Token 认证。
+- 尚未实现：`/v1/endpoints/{id}/test` 的管理 API 端点（CLI 已有本地端点测试）；保留期删除任务。
+- Collector 是明文 HTTP/1.1，代码不终止 TLS。非回环绑定必须同时显式传入 `--allow-remote` 和管理员 Token，否则 CLI 拒绝启动；生产部署仍必须使用带 TLS 和来源限制的反向代理。
 
 传输要求：
 
@@ -622,7 +622,7 @@ M3 实现状态：
 - 批次签名 + 幂等键。
 - 健康快照签名；健康数据属于运行遥测，不进入案件证据链。
 - Collector 不接受任意远程命令。
-- 管理接口使用独立凭据和来源限制（当前尚未内置，需由部署层补足）。
+- 管理接口使用独立管理员 Bearer Token；配置 Token 后管理路由要求认证，来源限制仍需由部署层补足。
 - 证据导出必须签名并带 manifest；导出动作进入保管链。
 
 ## 20. CLI
@@ -646,7 +646,7 @@ M3 实现状态：
 - `evidencewall retention set`
 - `evidencewall doctor`
 
-M3 已实现：`matrix init`、`endpoint add/list/test`、`sensor init/enroll/run/status`、`collector init/run/status/token rotate`、`profile list`、`canary create/list/rotate/sync`、`case list/show/review/hold/export`、`evidence verify`、`doctor`、`sensor emit-test`。`sensor run --once` 和 `--flush-only` 均执行一次补传后退出；省略 `--home` 时使用平台用户数据目录，并可由 `EVIDENCEWALL_HOME` 覆盖。`collector run` 在绑定非回环地址时要求显式 `--allow-remote`。其中 `retention set` 尚未实现；Legal Hold 目前只记录和审计，没有删除任务可被阻止。
+M3 已实现：`matrix init`、`endpoint add/list/test`、`sensor init/enroll/run/status`、`collector init/run/status/token rotate`、`profile list`、`canary create/list/rotate/sync`、`case list/show/review/hold/export`、`evidence verify`、`doctor`、`sensor emit-test`。`sensor run --once` 和 `--flush-only` 均执行一次补传后退出；省略 `--home` 时使用平台用户数据目录，并可由 `EVIDENCEWALL_HOME` 覆盖。`collector run` 在绑定非回环地址时要求显式 `--allow-remote` 和管理员 Token；令牌可用 `--admin-token-stdin` 从标准输入读取。其中 `retention set` 尚未实现；Legal Hold 目前只记录和审计，没有删除任务可被阻止。
 
 不在首版做 GUI、托盘程序或嵌入壳。
 
@@ -683,7 +683,7 @@ M3 已实现：`matrix init`、`endpoint add/list/test`、`sensor init/enroll/ru
 
 M2 已交付真实 HTTP/1.1 和通用 TCP 元数据监听、4 个内置 Profile、Canary Group、候选事件生成、基础案件聚合、Canary 部署查询和 CLI。M2 阶段案件按 `source_quality + source_ip` 聚合，只提供案件列表、详情和时间线；该阶段边界已由 M3 扩展。
 
-M2 当时尚未交付跨端点扫描形态、工具链关联、证据包、Legal Hold、离线校验、Highwall 事件导入和管理员认证。这些缺口已由 M3 补齐（管理员认证除外）。
+M2 当时尚未交付跨端点扫描形态、工具链关联、证据包、Legal Hold、离线校验、Highwall 事件导入和管理员认证。这些缺口已由 M3 补齐；TLS 终止和来源限制仍由部署层负责。
 
 ### 21.2 M3 已交付边界
 
@@ -697,7 +697,7 @@ M3 已交付：
 
 尚未交付：
 
-- 管理员认证、TLS 终止和来源限制；仍需部署层补足。
+- TLS 终止和来源限制；仍需部署层补足。管理员 Bearer Token 认证已内置，但不是完整的管理面加固方案。
 - 保留期删除任务；因此 Legal Hold 目前只有记录和审计，不能宣称自动删除被阻止。
 - 真实公网多 IP、多端口 T0/T1 拓扑验收；当前只有本地真实 socket、合成事件和 API/CLI 测试。
 - 上游 Highwall 事件签名；`highwall.jsonl` 是 Collector 对导入内容的记录，不是 Highwall 的签名证明。
@@ -839,7 +839,7 @@ M3 已交付：
 - Canary 部署映射在 Sensor 注册时写入 Collector；M3 已实现轮换后的签名增量同步。
 - M3 的 Legal Hold 是持久化记录和审计，不是删除保护；删除任务实现前不得宣称自动删除被阻止。
 - M3 的 Highwall 记录是辅助导入，不创建案件、不回写封禁规则，也没有上游签名。
-- Collector 非回环绑定必须显式使用 `--allow-remote`；默认回环保守，避免未认证管理面被误暴露。
+- Collector 非回环绑定必须显式使用 `--allow-remote` 并提供管理员 Token；默认回环保守，避免未认证管理面被误暴露。
 - 首版做 HTTP/1.1 + 通用 TCP 元数据监听，不做完整协议仿真。
 - 单端点只算蜜罐；跨端点关联才叫 EvidenceWall。
 - 先通过 T0/T1 验证，不购买 VPS 作为前置条件。

@@ -46,6 +46,15 @@ evidencewall collector init --home .\evidencewall-data\collector
 evidencewall collector run --home .\evidencewall-data\collector --host 127.0.0.1 --port 8787
 ```
 
+The Collector binds to loopback by default. A non-loopback bind requires both `--allow-remote` and an administrator token (prefer `--admin-token-stdin` so the token is not exposed in the process command line); startup is refused if either is missing. When configured, the administrator token protects every HTTP route except `/healthz` and Sensor ingress, and does not replace TLS or source restrictions. Remote deployments still need a controlled HTTPS reverse proxy and network ACLs.
+
+```powershell
+$env:EVIDENCEWALL_ADMIN_TOKEN = "<random token injected by your secret manager>"
+$env:EVIDENCEWALL_ADMIN_TOKEN | evidencewall collector run `
+  --home .\evidencewall-data\collector `
+  --host 0.0.0.0 --port 8787 --allow-remote --admin-token-stdin
+```
+
 On Linux/macOS, use `.venv/bin/python` for installation. In a second terminal, initialize the Sensor and an HTTP decoy:
 
 ```powershell
@@ -79,7 +88,7 @@ curl.exe -i -H "Host: evil.example" http://127.0.0.1:18080/api/config
 
 ## Security boundaries
 
-- The Collector binds to `127.0.0.1` by default. Binding a non-loopback address requires the explicit `--allow-remote` flag. The management API has no built-in administrator authentication; keep it on loopback or put it behind an authenticated, TLS-terminating proxy with source restrictions.
+- The Collector binds to `127.0.0.1` by default. A non-loopback bind requires both the explicit `--allow-remote` flag and an administrator token. Supply the token with `--admin-token-stdin` (recommended) or `--admin-token`; when configured, it protects every HTTP route except `/healthz` and the explicitly listed Sensor ingress routes, which retain their own enrollment or signature checks. The token is process-scoped and has no persistence, role separation, or automatic rotation. The code still does not terminate TLS, so remote deployments require a controlled HTTPS reverse proxy and source restrictions.
 - The Highwall import endpoint is part of the management surface. Do not expose it without authentication and source restrictions.
 - Collector transport is plain HTTP/1.1 and the code does not terminate TLS. Remote deployment must be protected by a controlled HTTPS reverse proxy.
 - HTTP decoys do not terminate TLS. Trusted proxy headers are not treated as direct-source evidence.

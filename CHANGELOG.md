@@ -4,10 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Collector 可选管理员 Bearer Token 认证；配置后默认保护除 `/healthz` 和 Sensor 接入路由外的所有 HTTP 路由。`collector run` 新增 `--admin-token` 和推荐使用的 `--admin-token-stdin`。
+
+### Security
+
+- 非回环 Collector 绑定现在同时要求 `--allow-remote` 和管理员 Token，未配置 Token 时拒绝启动；认证采用失败关闭的公开路由白名单。
+
 ### Planned
 
 - T0/T1 多 IP、多端口、NAT/代理测试床与真实部署验收。
-- Collector 管理面认证和 TLS 终止方案。
+- Collector TLS 终止方案和来源限制部署模板。
 - 保留期删除任务，并与 active Legal Hold 联动。
 
 ## [0.4.0] - 2026-11-09

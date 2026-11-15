@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -159,6 +160,7 @@ def create_app(
     private_key: Ed25519PrivateKey | None = None,
     public_key: Ed25519PublicKey | None = None,
     exports_dir: Path | None = None,
+    admin_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="EvidenceWall Collector",
@@ -168,6 +170,16 @@ def create_app(
     )
     package_root = Path(exports_dir) if exports_dir is not None else store.path.parent / "exports"
     package_root.mkdir(parents=True, exist_ok=True)
+    admin_token_hash = sha256_hex(admin_token) if admin_token else None
+    public_paths = frozenset(
+        {
+            "/healthz",
+            "/v1/sensors/enroll",
+            "/v1/events:batch",
+            "/v1/sensors/health",
+            "/v1/sensors/canaries",
+        }
+    )
 
     @app.exception_handler(ValidationError)
     async def validation_error_handler(_request: Request, exc: ValidationError):
@@ -190,6 +202,28 @@ def create_app(
                 return JSONResponse(status_code=400, content={"detail": "invalid Content-Length"})
             if length > MAX_REQUEST_BYTES:
                 return JSONResponse(status_code=413, content={"detail": "request body is too large"})
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def require_admin_token(request: Request, call_next):
+        path = request.url.path
+        if (
+            admin_token_hash is not None
+            and path not in public_paths
+        ):
+            authorization = request.headers.get("authorization", "")
+            scheme, separator, token = authorization.partition(" ")
+            if (
+                scheme.lower() != "bearer"
+                or not separator
+                or not token
+                or not hmac.compare_digest(sha256_hex(token), admin_token_hash)
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "admin authentication required"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
         return await call_next(request)
 
     @app.get("/healthz")
