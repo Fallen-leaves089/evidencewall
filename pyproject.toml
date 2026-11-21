@@ -47,7 +47,7 @@ Security = "https://github.com/Fallen-leaves089/evidencewall/security/policy"
 
 [project.optional-dependencies]
 test = ["httpx>=0.27"]
-quality = ["coverage==7.16.2", "ruff==0.17.4"]
+quality = ["coverage==7.16.2", "ruff==0.17.5"]
 release = ["build>=1.2", "twine>=5"]
 
 [project.scripts]
